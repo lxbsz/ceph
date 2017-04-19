@@ -1,7 +1,7 @@
 os_type: centos
 os_version: "7.3"
 overrides:
-    ceph-ansible:
+    ceph_ansible:
       osd_auto_discovery: false
       vars:
         ceph_conf_overrides:
