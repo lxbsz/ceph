@@ -8056,6 +8056,7 @@ int MDCache::path_traverse(MDRequestRef& mdr, MDSContextFactory& cf,     // who
   bool discover = (onfail == MDS_TRAVERSE_DISCOVER);
   bool null_okay = (onfail == MDS_TRAVERSE_DISCOVERXLOCK);
   bool forward = (onfail == MDS_TRAVERSE_FORWARD);
+  const cref_t<MClientRequest> &req = mdr->client_request;
 
   ceph_assert(!forward || mdr);  // forward requires a request
 
@@ -8103,8 +8104,15 @@ int MDCache::path_traverse(MDRequestRef& mdr, MDSContextFactory& cf,     // who
       return -ENOTDIR;
     }
 
-    // walk into snapdir?
     if (path[depth].length() == 0) {
+      // this is extra slash, do nothing
+      if (!req->is_snap_op()) {
+        dout(10) << "traverse: extra slash" << dendl;
+        depth++;
+        continue;
+      }
+
+      // walk into snapdir
       dout(10) << "traverse: snapdir" << dendl;
       if (!mdr)
 	return -EINVAL;
