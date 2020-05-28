@@ -1209,6 +1209,38 @@ def clear_old_log():
         init_log()
         log.info('logging in a fresh file now...')
 
+# This will cleanup the stale netnses, which are from the
+# last failed test cases.
+def cleanup_stale_netnses_and_bridge():
+    global remote
+    remote = LocalRemote()
+
+    p = remote.run(args=['ip', 'netns', 'list'],
+                   stderr=StringIO(), stdout=StringIO(),
+                   timeout=(5*60))
+    p = p.stdout.getvalue().strip()
+
+    # Get the netns name list
+    netns_list = re.findall(r'ceph-ns-[^()\s][-.\w]+[^():\s]', p)
+
+    # Remove the stale netnses
+    for ns in netns_list:
+        ns_name = ns.split()[0]
+        args = ["sudo", "bash", "-c",
+                "ip netns delete {0}".format(ns_name)]
+        try:
+            remote.run(args=args, timeout=(5*60))
+        except Exception:  
+            pass
+
+    # Remove the stale 'ceph-brx'
+    try:
+        args = ["sudo", "bash", "-c",
+                "ip link delete ceph-brx"]
+        remote.run(args=args, timeout=(5*60))
+    except Exception:
+        pass
+
 def exec_test():
     # Parse arguments
     opt_interactive_on_error = False
@@ -1260,6 +1292,8 @@ def exec_test():
         else:
             log.error("Unknown option '{0}'".format(f))
             sys.exit(-1)
+
+    cleanup_stale_netnses_and_bridge()
 
     # Help developers by stopping up-front if their tree isn't built enough for all the
     # tools that the tests might want to use (add more here if needed)

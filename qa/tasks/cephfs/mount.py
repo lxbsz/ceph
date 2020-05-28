@@ -174,12 +174,18 @@ class CephFSMount(object):
             for ns in netns_list:
                 ns_name = ns.split()[0]
                 args = ['sudo', 'ip', 'netns', 'exec', '{0}'.format(ns_name), 'ip', 'addr']
-                p = self.client_remote.run(args=args, stderr=StringIO(),
-                                           stdout=StringIO(), timeout=(5*60))
-                q = re.search("{0}".format(ip), p.stdout.getvalue())
-                if q is not None:
-                    found = True
-                    break
+                try:
+                    p = self.client_remote.run(args=args, stderr=StringIO(),
+                                               stdout=StringIO(), timeout=(5*60))
+                    q = re.search("{0}".format(ip), p.stdout.getvalue())
+                    if q is not None:
+                        found = True
+                        break
+                except CommandFailedError:
+                    if "No such file or directory" in stderr.getvalue():
+                        pass
+                    if "Invalid argument" in stderr.getvalue():
+                        pass
 
             if found == False:
                 break
