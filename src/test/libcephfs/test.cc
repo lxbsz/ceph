@@ -40,7 +40,7 @@
 #ifndef ALLPERMS
 #define ALLPERMS (S_ISUID|S_ISGID|S_ISVTX|S_IRWXU|S_IRWXG|S_IRWXO)
 #endif
-
+#if 0
 TEST(LibCephFS, OpenEmptyComponent) {
 
   pid_t mypid = getpid();
@@ -1983,13 +1983,15 @@ TEST(LibCephFS, OperationsOnRoot)
 
   ceph_shutdown(cmount);
 }
-
+#endif
 static void shutdown_racer_func()
 {
   const int niter = 32;
   struct ceph_mount_info *cmount;
   int i;
+  static int j = 0;
 
+  fprintf(stderr, "lxb ----------j=%d shutdown_racer_func\n", j++);
   for (i = 0; i < niter; ++i) {
     ASSERT_EQ(ceph_create(&cmount, NULL), 0);
     ASSERT_EQ(ceph_conf_read_file(cmount, NULL), 0);
@@ -2016,8 +2018,10 @@ TEST(LibCephFS, ShutdownRace)
   for (int i = 0; i < nthreads; ++i)
     threads[i] = std::thread(shutdown_racer_func);
 
-  for (int i = 0; i < nthreads; ++i)
+  for (int i = 0; i < nthreads; ++i) {
+    fprintf(stderr, "lxb ----------i=%d join\n", i);
     threads[i].join();
+  }
   ASSERT_EQ(setrlimit(RLIMIT_NOFILE, &rold), 0);
 }
 
@@ -2198,7 +2202,7 @@ TEST(LibCephFS, TestFutimens) {
   ceph_close(cmount, fd);
   ceph_shutdown(cmount);
 }
-
+#if 0
 TEST(LibCephFS, OperationsOnDotDot) {
   struct ceph_mount_info *cmount;
   ASSERT_EQ(ceph_create(&cmount, NULL), 0);
@@ -2351,3 +2355,4 @@ TEST(LibCephFS, Lseek) {
   ASSERT_EQ(0, ceph_close(cmount, fd));
   ceph_shutdown(cmount);
 }
+#endif
