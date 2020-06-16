@@ -24,7 +24,6 @@ tasks:
         - libtool-bin
         - uuid-dev
         - xfslibs-dev
-        - ceph-common-debuginfo
         rpm:
         - bison
         - flex
@@ -47,7 +46,6 @@ tasks:
         - libtool
         - libuuid-devel
         - xfsprogs-devel
-        - ceph-common-debuginfo
   - ceph:
       deb:
         - ceph
