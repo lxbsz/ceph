@@ -2012,6 +2012,7 @@ TEST(LibCephFS, ShutdownRace)
   rnew.rlim_cur = rnew.rlim_max;
   ASSERT_EQ(setrlimit(RLIMIT_NOFILE, &rnew), 0);
 
+  fprintf(stderr, "lxb------ rnew.rlim_max = %u\n", (unsigned int)rnew.rlim_max);
   for (int i = 0; i < nthreads; ++i)
     threads[i] = std::thread(shutdown_racer_func);
 
