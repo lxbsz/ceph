@@ -22,6 +22,7 @@
 #include "common/ceph_mutex.h"
 #include "common/cmdparse.h"
 #include "common/compiler_extensions.h"
+#include "common/RWRef.h"
 #include "include/common_fwd.h"
 #include "include/cephfs/ceph_ll_client.h"
 #include "include/filepath.h"
@@ -66,6 +67,7 @@ class WritebackHandler;
 
 class MDSMap;
 class Message;
+class destructive_lock_ref_t;
 
 enum {
   l_c_first = 20000,
@@ -250,6 +252,62 @@ public:
 	     bufferlist& out) override;
   private:
     Client *m_client;
+  };
+
+  struct mount_state_t : public RWRefState {
+    public:
+      bool is_valid_state(int64_t state) override {
+        switch (state) {
+	  case Client::CLIENT_MOUNTING:
+	  case Client::CLIENT_MOUNTED:
+	  case Client::CLIENT_UNMOUNTING:
+	  case Client::CLIENT_UNMOUNTED:
+            return true;
+          default:
+            return false;
+        }
+      }
+
+      int check_state(int64_t s, int64_t r) override {
+        if (r == Client::CLIENT_MOUNTING &&
+            (s == Client::CLIENT_MOUNTING || s == Client::CLIENT_MOUNTED))
+          return true;
+        else if (s == r)
+          return true;
+        else
+          return false;
+      }
+
+      mount_state_t(int64_t s, uint64_t rc=0) : RWRefState (s, rc) {}
+     // mount_state_t(int64_t s, uint64_t rc=0) {state = s; reader_cnt = rc; }
+      ~mount_state_t() {}
+  };
+
+  struct initialize_state_t : public RWRefState {
+    public:
+      bool is_valid_state(int64_t state) override {
+        switch (state) {
+          case Client::CLIENT_NULL:
+	  case Client::CLIENT_NEW:
+	  case Client::CLIENT_INITIALIZED:
+            return true;
+          default:
+            return false;
+        }
+      }
+
+      int check_state(int64_t s, int64_t r) override {
+        if (r == Client::CLIENT_INITIALIZED && s >= Client::CLIENT_INITIALIZED)
+          return true;
+        else if (s == r)
+          return true;
+        else
+          return false;
+      }
+
+      initialize_state_t(int64_t s, uint64_t rc=0) : RWRefState (s, rc) {}
+     // initialize_state_t(int64_t s, uint64_t rc=0) {state = s; reader_cnt = rc;}
+      ~initialize_state_t() {}
   };
 
   Client(Messenger *m, MonClient *mc, Objecter *objecter_);
@@ -760,9 +818,6 @@ protected:
   static const unsigned CHECK_CAPS_NODELAY = 0x1;
   static const unsigned CHECK_CAPS_SYNCHRONOUS = 0x2;
 
-
-  bool is_initialized() const { return initialized; }
-
   void check_caps(Inode *in, unsigned flags);
 
   void set_cap_epoch_barrier(epoch_t e);
@@ -982,6 +1037,31 @@ protected:
 
   client_t whoami;
 
+  enum _state {
+    CLIENT_NULL,
+    CLIENT_NEW,
+    CLIENT_INITIALIZED,
+    CLIENT_MOUNTING,
+    CLIENT_MOUNTED,
+    CLIENT_UNMOUNTING,
+    CLIENT_UNMOUNTED = CLIENT_INITIALIZED,
+  };
+
+  struct mount_state_t mount_state;
+  bool is_unmounting() {
+    return mount_state.get_state() == CLIENT_UNMOUNTING;
+  }
+  bool is_mounted() {
+    return mount_state.get_state() == CLIENT_MOUNTED;
+  }
+  bool is_mounting() {
+    return mount_state.get_state() == CLIENT_MOUNTING;
+  }
+
+  struct initialize_state_t initialize_state;
+  bool is_initialized() {
+    return initialize_state.get_state() == CLIENT_INITIALIZED;
+  }
 
 private:
   struct C_Readahead : public Context {
@@ -1249,9 +1329,6 @@ private:
   ceph::unordered_set<dir_result_t*> opened_dirs;
   uint64_t fd_gen = 1;
 
-  bool   initialized = false;
-  bool   mounted = false;
-  bool   unmounting = false;
   bool   blacklisted = false;
 
   ceph::unordered_map<vinodeno_t, Inode*> inode_map;
