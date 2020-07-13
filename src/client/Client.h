@@ -235,6 +235,7 @@ public:
   friend class C_Client_CacheRelease; // Asserts on client_lock
   friend class SyntheticClient;
   friend void intrusive_ptr_release(Inode *in);
+  friend class unmounting_lock_ref_t;
 
   using Dispatcher::cct;
 
@@ -1236,7 +1237,13 @@ private:
 
   bool   initialized = false;
   bool   mounted = false;
+
+  // global unmount lock
+  ceph::mutex unmounting_lock = ceph::make_mutex("Client::unmount_lock");
+  ceph::condition_variable unmounting_cond;
+  int unmounting_refcnt = 0;
   bool   unmounting = false;
+
   bool   blacklisted = false;
 
   ceph::unordered_map<vinodeno_t, Inode*> inode_map;
@@ -1296,6 +1303,51 @@ public:
 
   int init() override;
   void shutdown() override;
+};
+
+class unmounting_lock_ref_t {
+public:
+  unmounting_lock_ref_t(const unmounting_lock_ref_t &) = delete;
+  unmounting_lock_ref_t(const unmounting_lock_ref_t &&) = delete;
+  unmounting_lock_ref_t(class Client *c, bool unmount=false) {
+    {
+      std::lock_guard umlock{c->unmounting_lock};
+      if (c->unmounting)
+        return;
+
+      if (likely(!unmount))
+        c->unmounting_refcnt++;
+      else
+        c->unmounting = true;
+    }
+
+    client = c;
+  }
+
+  /* returning false means client is already unmounting */
+  bool wait() {
+    if (client == nullptr)
+      return false;
+
+    std::unique_lock umlock{client->unmounting_lock};
+    client->unmounting_cond.wait(umlock, [this] {
+      return !client->unmounting_refcnt;
+    });
+
+    return true;
+  }
+
+  ~unmounting_lock_ref_t() {
+    if (!client)
+      return;
+
+    std::lock_guard umlock{client->unmounting_lock};
+    client->unmounting_refcnt--;
+    client->unmounting_cond.notify_all();
+  }
+
+private:
+  class Client *client = nullptr;
 };
 
 #endif
