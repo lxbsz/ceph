@@ -65,6 +65,7 @@ class WritebackHandler;
 
 class MDSMap;
 class Message;
+class destructive_lock_ref_t;
 
 enum {
   l_c_first = 20000,
@@ -235,6 +236,7 @@ public:
   friend class C_Client_CacheRelease; // Asserts on client_lock
   friend class SyntheticClient;
   friend void intrusive_ptr_release(Inode *in);
+  friend class destructive_lock_ref_t;
 
   using Dispatcher::cct;
 
@@ -746,9 +748,6 @@ protected:
   static const unsigned CHECK_CAPS_NODELAY = 0x1;
   static const unsigned CHECK_CAPS_SYNCHRONOUS = 0x2;
 
-
-  bool is_initialized() const { return initialized; }
-
   void check_caps(Inode *in, unsigned flags);
 
   void set_cap_epoch_barrier(epoch_t e);
@@ -968,6 +967,25 @@ protected:
 
   client_t whoami;
 
+  // global unmount lock
+  ceph::mutex destructive_lock = ceph::make_mutex("Client::unmount_lock");
+  ceph::condition_variable destructive_cond;
+  int unmounting_refcnt = 0;
+  int shutdown_refcnt = 0;
+
+  enum _state{
+    STATE_NULL,  // not used
+    STATE_NEW,
+    STATE_INITIALIZED,
+    STATE_MOUNTED,
+    STATE_UNMOUNTING,
+  } state;
+
+  bool is_new() { return state == STATE_NEW; }
+  bool is_initialized() { return state >= STATE_INITIALIZED; }
+  bool is_mounted() { return state == STATE_MOUNTED; }
+  bool is_unmounting() { return state == STATE_UNMOUNTING; }
+  void update_state(enum _state s) { state = s; }
 
 private:
   struct C_Readahead : public Context {
@@ -1234,9 +1252,6 @@ private:
   ceph::unordered_set<dir_result_t*> opened_dirs;
   uint64_t fd_gen = 1;
 
-  bool   initialized = false;
-  bool   mounted = false;
-  bool   unmounting = false;
   bool   blacklisted = false;
 
   ceph::unordered_map<vinodeno_t, Inode*> inode_map;
@@ -1296,6 +1311,72 @@ public:
 
   int init() override;
   void shutdown() override;
+};
+
+class destructive_lock_ref_t {
+public:
+  destructive_lock_ref_t(const destructive_lock_ref_t &) = delete;
+  destructive_lock_ref_t(const destructive_lock_ref_t &&) = delete;
+  destructive_lock_ref_t(class Client *c, Client::_state state, bool update_state=false) {
+    {
+      std::lock_guard umlock{c->destructive_lock};
+      /*
+       * STATE_UNMOUNTING: unmounting
+       * STATE_NEW: uninitialize
+       */
+      ceph_assert(state == Client::STATE_UNMOUNTING ||
+		  state == Client::STATE_NEW);
+
+      if (likely(!update_state)) {
+        if (state == Client::STATE_UNMOUNTING)
+          c->unmounting_refcnt++;
+	else
+          c->shutdown_refcnt++;
+      } else {
+        c->update_state(state);
+      }
+    }
+
+    type = state;
+    client = c;
+  }
+
+  /* returning false means client is already unmounted or unmounting */
+  bool unmounting_wait() {
+    std::unique_lock l{client->destructive_lock};
+    if (!client->is_mounted())
+      return false;
+
+    client->destructive_cond.wait(l, [this] {
+      return !client->unmounting_refcnt;
+    });
+
+    return true;
+  }
+
+  /* returning false means client is already uninitialized */
+  bool shutdown_wait() {
+    std::unique_lock l{client->destructive_lock};
+    if (client->is_new())
+      return false;
+
+    client->destructive_cond.wait(l, [this] {
+      return !client->shutdown_refcnt;
+    });
+
+    return true;
+  }
+
+  ~destructive_lock_ref_t() {
+    std::lock_guard l{client->destructive_lock};
+    if ((type == Client::STATE_UNMOUNTING && --client->unmounting_refcnt == 0) ||
+	(type == Client::STATE_NEW && --client->shutdown_refcnt == 0))
+      client->destructive_cond.notify_all();
+  }
+
+private:
+  class Client *client = nullptr;
+  Client::_state type;
 };
 
 #endif

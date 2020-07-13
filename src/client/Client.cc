@@ -272,6 +272,7 @@ Client::Client(Messenger *m, MonClient *mc, Objecter *objecter_)
     monclient(mc),
     objecter(objecter_),
     whoami(mc->get_global_id()),
+    state(STATE_NEW),
     async_ino_invalidator(m->cct),
     async_dentry_invalidator(m->cct),
     interrupt_finisher(m->cct),
@@ -490,10 +491,12 @@ void Client::_pre_init()
 
 int Client::init()
 {
+  destructive_lock_ref_t dlr(this, Client::STATE_NEW);
+
   _pre_init();
   {
     std::lock_guard l{client_lock};
-    ceph_assert(!initialized);
+    ceph_assert(!is_initialized());
     messenger->add_dispatcher_tail(this);
   }
   _finish_init();
@@ -555,12 +558,18 @@ void Client::_finish_init()
   }
 
   std::lock_guard l{client_lock};
-  initialized = true;
+  update_state(Client::STATE_INITIALIZED);
 }
 
 void Client::shutdown() 
 {
   ldout(cct, 1) << __func__ << dendl;
+
+  destructive_lock_ref_t dlr(this, Client::STATE_NEW, true);
+  if (!dlr.shutdown_wait())
+    return;
+
+  ceph_assert(!is_mounted());
 
   // If we were not mounted, but were being used for sending
   // MDS commands, we may have sessions that need closing.
@@ -605,8 +614,8 @@ void Client::shutdown()
   objectcacher->stop();  // outside of client_lock! this does a join.
   {
     std::lock_guard l{client_lock};
-    ceph_assert(initialized);
-    initialized = false;
+    ceph_assert(is_initialized());
+    update_state(Client::STATE_NEW);
     timer.shutdown();
   }
   objecter_finisher.wait_for_empty();
@@ -627,10 +636,13 @@ void Client::trim_cache(bool trim_kernel_dcache)
   uint64_t max = cct->_conf->client_cache_size;
   ldout(cct, 20) << "trim_cache size " << lru.lru_get_size() << " max " << max << dendl;
   unsigned last = 0;
+
+  destructive_lock_ref_t ulr(this, Client::STATE_UNMOUNTING);
+
   while (lru.lru_get_size() != last) {
     last = lru.lru_get_size();
 
-    if (!unmounting && lru.lru_get_size() <= max)  break;
+    if (!!is_mounted() && lru.lru_get_size() <= max)  break;
 
     // trim!
     Dentry *dn = static_cast<Dentry*>(lru.lru_get_next_expire());
@@ -835,7 +847,7 @@ Inode * Client::add_update_inode(InodeStat *st, utime_t from,
         _assign_faked_root(root);
       root_ancestor = in;
       cwd = root;
-    } else if (!mounted) {
+    } else if (!is_mounted()) {
       root_parents[root_ancestor] = in;
       root_ancestor = in;
     }
@@ -2033,8 +2045,12 @@ void Client::populate_metadata(const std::string &mount_root)
  */
 void Client::update_metadata(std::string const &k, std::string const &v)
 {
+  ceph_assert(is_initialized());
+  destructive_lock_ref_t dlr(this, Client::STATE_NEW);
+  if (!is_initialized())
+    return;
+
   std::lock_guard l(client_lock);
-  ceph_assert(initialized);
 
   auto it = metadata.find(k);
   if (it != metadata.end()) {
@@ -2113,7 +2129,7 @@ void Client::handle_client_session(const MConstRef<MClientSession>& m)
 
       renew_caps(session);
       session->state = MetaSession::STATE_OPEN;
-      if (unmounting)
+      if (!is_mounted())
 	mount_cond.notify_all();
       else
 	connect_mds_targets(from);
@@ -2442,7 +2458,7 @@ void Client::handle_client_reply(const MConstRef<MClientReply>& reply)
     request->item.remove_myself();
     unregister_request(request);
   }
-  if (unmounting)
+  if (!is_mounted())
     mount_cond.notify_all();
 }
 
@@ -2578,11 +2594,14 @@ void Client::handle_osd_map(const MConstRef<MOSDMap>& m)
 
 bool Client::ms_dispatch2(const MessageRef &m)
 {
-  std::lock_guard l(client_lock);
-  if (!initialized) {
+  destructive_lock_ref_t dlr(this, Client::STATE_NEW);
+  if (!is_initialized()) {
     ldout(cct, 10) << "inactive, discarding " << *m << dendl;
     return true;
   }
+  destructive_lock_ref_t ulr(this, Client::STATE_UNMOUNTING);
+
+  std::lock_guard l(client_lock);
 
   switch (m->get_type()) {
     // mounting and mds sessions
@@ -2641,7 +2660,7 @@ bool Client::ms_dispatch2(const MessageRef &m)
   }
 
   // unmounting?
-  if (unmounting) {
+  if (!is_mounted()) {
     ldout(cct, 10) << "unmounting: trim pass, size was " << lru.lru_get_size() 
              << "+" << inode_map.size() << dendl;
     long unsigned size = lru.lru_get_size() + inode_map.size();
@@ -3534,8 +3553,10 @@ void Client::check_caps(Inode *in, unsigned flags)
   int orig_used = used;
   used = adjust_caps_used_for_lazyio(used, issued, implemented);
 
+  destructive_lock_ref_t ulr(this, Client::STATE_UNMOUNTING);
+
   int retain = wanted | used | CEPH_CAP_PIN;
-  if (!unmounting && in->nlink > 0) {
+  if (!!is_mounted() && in->nlink > 0) {
     if (wanted) {
       retain |= CEPH_CAP_ANY;
     } else if (in->is_dir() &&
@@ -3618,7 +3639,7 @@ void Client::check_caps(Inode *in, unsigned flags)
     if (wanted & ~(cap.wanted | cap.issued))
       goto ack;
 
-    if (!revoking && unmounting && (cap_used == 0))
+    if (!revoking && !is_mounted() && (cap_used == 0))
       goto ack;
 
     if ((cap.issued & ~retain) == 0 && // and we don't have anything we wouldn't like
@@ -3900,8 +3921,10 @@ public:
 
 void Client::_async_invalidate(vinodeno_t ino, int64_t off, int64_t len)
 {
-  if (unmounting)
+  destructive_lock_ref_t ulr(this, Client::STATE_UNMOUNTING);
+  if (!is_mounted())
     return;
+
   ldout(cct, 10) << __func__ << " " << ino << " " << off << "~" << len << dendl;
   ino_invalidate_cb(callback_handle, ino, off, len);
 }
@@ -4221,6 +4244,8 @@ int Client::_do_remount(bool retry_on_error)
 {
   uint64_t max_retries = g_conf().get_val<uint64_t>("mds_max_retries_on_remount_failure");
 
+  destructive_lock_ref_t ulr(this, Client::STATE_UNMOUNTING);
+
   errno = 0;
   int r = remount_cb(callback_handle);
   if (r == 0) {
@@ -4241,7 +4266,7 @@ int Client::_do_remount(bool retry_on_error)
       (cct->_conf.get_val<bool>("client_die_on_failed_remount") ||
        cct->_conf.get_val<bool>("client_die_on_failed_dentry_invalidate")) &&
       !(retry_on_error && (++retries_on_invalidate < max_retries));
-    if (should_abort && !unmounting) {
+    if (should_abort && !!is_mounted()) {
       lderr(cct) << "failed to remount for kernel dentry trimming; quitting!" << dendl;
       ceph_abort();
     }
@@ -4262,8 +4287,10 @@ public:
 
 void Client::_invalidate_kernel_dcache()
 {
-  if (unmounting)
+  destructive_lock_ref_t ulr(this, Client::STATE_UNMOUNTING);
+  if (!is_mounted())
     return;
+
   if (can_invalidate_dentries) {
     if (dentry_invalidate_cb && root->dir) {
       for (ceph::unordered_map<string, Dentry*>::iterator p = root->dir->dentries.begin();
@@ -4325,8 +4352,10 @@ public:
 
 void Client::_async_inode_release(vinodeno_t ino)
 {
-  if (unmounting)
+  destructive_lock_ref_t ulr(this, Client::STATE_UNMOUNTING);
+  if (!is_mounted())
     return;
+
   ldout(cct, 10) << __func__ << " " << ino << dendl;
   ino_release_cb(callback_handle, ino);
 }
@@ -5207,8 +5236,10 @@ public:
 
 void Client::_async_dentry_invalidate(vinodeno_t dirino, vinodeno_t ino, string& name)
 {
-  if (unmounting)
+  destructive_lock_ref_t ulr(this, Client::STATE_UNMOUNTING);
+  if (!is_mounted())
     return;
+
   ldout(cct, 10) << __func__ << " '" << name << "' ino " << ino
 		 << " in dir " << dirino << dendl;
   dentry_invalidate_cb(callback_handle, dirino, ino, name.c_str(), name.length());
@@ -5807,10 +5838,11 @@ int Client::mds_command(
     string *outs,
     Context *onfinish)
 {
-  std::lock_guard lock(client_lock);
-
-  if (!initialized)
+  destructive_lock_ref_t dlr(this, Client::STATE_NEW);
+  if (!is_initialized())
     return -ENOTCONN;
+
+  std::lock_guard lock(client_lock);
 
   int r;
   r = authenticate();
@@ -5953,14 +5985,22 @@ int Client::subscribe_mdsmap(const std::string &fs_name)
 int Client::mount(const std::string &mount_root, const UserPerm& perms,
 		  bool require_mds, const std::string &fs_name)
 {
-  std::lock_guard lock(client_lock);
+  destructive_lock_ref_t dlr(this, Client::STATE_NEW);
+  if (!is_initialized())
+    return -ENOTCONN;
 
-  if (mounted) {
+  if (is_mounted()) {
     ldout(cct, 5) << "already mounted" << dendl;
     return 0;
   }
 
-  unmounting = false;
+  /*
+   * To make sure that the _unmount() must wait until the mount()
+   * is done.
+   */
+  destructive_lock_ref_t ulr(this, Client::STATE_UNMOUNTING);
+
+  std::lock_guard lock(client_lock);
 
   int r = subscribe_mdsmap(fs_name);
   if (r < 0) {
@@ -6019,8 +6059,6 @@ int Client::mount(const std::string &mount_root, const UserPerm& perms,
   ceph_assert(root);
   _ll_get(root);
 
-  mounted = true;
-
   // trace?
   if (!cct->_conf->client_trace.empty()) {
     traceout.open(cct->_conf->client_trace.c_str());
@@ -6041,6 +6079,8 @@ int Client::mount(const std::string &mount_root, const UserPerm& perms,
   ldout(cct, 3) << "op: map<int, int> open_files;" << dendl;
   ldout(cct, 3) << "op: int fd;" << dendl;
   */
+
+  update_state(Client::STATE_MOUNTED);
   return 0;
 }
 
@@ -6136,16 +6176,21 @@ void Client::_abort_mds_sessions(int err)
 
 void Client::_unmount(bool abort)
 {
-  std::unique_lock lock{client_lock};
-  if (unmounting)
+  destructive_lock_ref_t dlr(this, Client::STATE_NEW);
+  if (!is_initialized())
     return;
+
+  destructive_lock_ref_t ulr(this, Client::STATE_UNMOUNTING, true);
+  if (!ulr.unmounting_wait())
+    return;
+
+  std::unique_lock lock{client_lock};
 
   if (abort || blacklisted) {
     ldout(cct, 2) << "unmounting (" << (abort ? "abort)" : "blacklisted)") << dendl;
   } else {
     ldout(cct, 2) << "unmounting" << dendl;
   }
-  unmounting = true;
 
   deleg_timeout = 0;
 
@@ -6266,7 +6311,7 @@ void Client::_unmount(bool abort)
 
   _close_sessions();
 
-  mounted = false;
+  update_state(Client::STATE_INITIALIZED);
 
   ldout(cct, 2) << "unmounted." << dendl;
 }
@@ -6300,6 +6345,8 @@ void Client::flush_cap_releases()
 
 void Client::tick()
 {
+  destructive_lock_ref_t ulr(this, Client::STATE_UNMOUNTING);
+
   if (cct->_conf->client_debug_inject_tick_delay > 0) {
     sleep(cct->_conf->client_debug_inject_tick_delay);
     ceph_assert(0 == cct->_conf.set_val("client_debug_inject_tick_delay", "0"));
@@ -6316,7 +6363,7 @@ void Client::tick()
       }));
   utime_t now = ceph_clock_now();
 
-  if (!mounted && !mds_requests.empty()) {
+  if (!is_mounted() && !mds_requests.empty()) {
     MetaRequest *req = mds_requests.begin()->second;
     if (req->op_stamp + cct->_conf->client_mount_timeout < now) {
       req->abort(-ETIMEDOUT);
@@ -6353,7 +6400,7 @@ void Client::tick()
 
   trim_cache(true);
 
-  if (blacklisted && mounted &&
+  if (blacklisted && is_mounted() &&
       last_auto_reconnect + 30 * 60 < now &&
       cct->_conf.get_val<bool>("client_reconnect_stale")) {
     messenger->client_reset();
@@ -6645,17 +6692,19 @@ int Client::path_walk(const filepath& origpath, InodeRef *end,
 
 int Client::link(const char *relexisting, const char *relpath, const UserPerm& perm)
 {
-  std::lock_guard lock(client_lock);
   tout(cct) << "link" << std::endl;
   tout(cct) << relexisting << std::endl;
   tout(cct) << relpath << std::endl;
 
-  if (unmounting)
+  destructive_lock_ref_t ulr(this, Client::STATE_UNMOUNTING);
+  if (!is_mounted())
     return -ENOTCONN;
 
   filepath existing(relexisting);
 
   InodeRef in, dir;
+
+  std::lock_guard lock(client_lock);
   int r = path_walk(existing, &in, perm, true);
   if (r < 0)
     return r;
@@ -6688,11 +6737,11 @@ int Client::link(const char *relexisting, const char *relpath, const UserPerm& p
 
 int Client::unlink(const char *relpath, const UserPerm& perm)
 {
-  std::lock_guard lock(client_lock);
   tout(cct) << __func__ << std::endl;
   tout(cct) << relpath << std::endl;
 
-  if (unmounting)
+  destructive_lock_ref_t ulr(this, Client::STATE_UNMOUNTING);
+  if (!is_mounted())
     return -ENOTCONN;
 
   if (std::string(relpath) == "/")
@@ -6702,6 +6751,8 @@ int Client::unlink(const char *relpath, const UserPerm& perm)
   string name = path.last_dentry();
   path.pop_dentry();
   InodeRef dir;
+
+  std::lock_guard lock(client_lock);
   int r = path_walk(path, &dir, perm);
   if (r < 0)
     return r;
@@ -6715,12 +6766,12 @@ int Client::unlink(const char *relpath, const UserPerm& perm)
 
 int Client::rename(const char *relfrom, const char *relto, const UserPerm& perm)
 {
-  std::lock_guard lock(client_lock);
   tout(cct) << __func__ << std::endl;
   tout(cct) << relfrom << std::endl;
   tout(cct) << relto << std::endl;
 
-  if (unmounting)
+  destructive_lock_ref_t ulr(this, Client::STATE_UNMOUNTING);
+  if (!is_mounted())
     return -ENOTCONN;
 
   if (std::string(relfrom) == "/" || std::string(relto) == "/")
@@ -6734,6 +6785,8 @@ int Client::rename(const char *relfrom, const char *relto, const UserPerm& perm)
   to.pop_dentry();
 
   InodeRef fromdir, todir;
+
+  std::lock_guard lock(client_lock);
   int r = path_walk(from, &fromdir, perm);
   if (r < 0)
     goto out;
@@ -6758,13 +6811,13 @@ out:
 
 int Client::mkdir(const char *relpath, mode_t mode, const UserPerm& perm)
 {
-  std::lock_guard lock(client_lock);
   tout(cct) << __func__ << std::endl;
   tout(cct) << relpath << std::endl;
   tout(cct) << mode << std::endl;
   ldout(cct, 10) << __func__ << ": " << relpath << dendl;
 
-  if (unmounting)
+  destructive_lock_ref_t ulr(this, Client::STATE_UNMOUNTING);
+  if (!is_mounted())
     return -ENOTCONN;
 
   if (std::string(relpath) == "/")
@@ -6774,6 +6827,8 @@ int Client::mkdir(const char *relpath, mode_t mode, const UserPerm& perm)
   string name = path.last_dentry();
   path.pop_dentry();
   InodeRef dir;
+
+  std::lock_guard lock(client_lock);
   int r = path_walk(path, &dir, perm);
   if (r < 0)
     return r;
@@ -6787,13 +6842,13 @@ int Client::mkdir(const char *relpath, mode_t mode, const UserPerm& perm)
 
 int Client::mkdirs(const char *relpath, mode_t mode, const UserPerm& perms)
 {
-  std::lock_guard lock(client_lock);
   ldout(cct, 10) << "Client::mkdirs " << relpath << dendl;
   tout(cct) << __func__ << std::endl;
   tout(cct) << relpath << std::endl;
   tout(cct) << mode << std::endl;
 
-  if (unmounting)
+  destructive_lock_ref_t ulr(this, Client::STATE_UNMOUNTING);
+  if (!is_mounted())
     return -ENOTCONN;
 
   //get through existing parts of path
@@ -6801,6 +6856,8 @@ int Client::mkdirs(const char *relpath, mode_t mode, const UserPerm& perms)
   unsigned int i;
   int r = 0, caps = 0;
   InodeRef cur, next;
+
+  std::lock_guard lock(client_lock);
   cur = cwd;
   for (i=0; i<path.depth(); ++i) {
     if (cct->_conf->client_permissions) {
@@ -6842,11 +6899,11 @@ int Client::mkdirs(const char *relpath, mode_t mode, const UserPerm& perms)
 
 int Client::rmdir(const char *relpath, const UserPerm& perms)
 {
-  std::lock_guard lock(client_lock);
   tout(cct) << __func__ << std::endl;
   tout(cct) << relpath << std::endl;
 
-  if (unmounting)
+  destructive_lock_ref_t ulr(this, Client::STATE_UNMOUNTING);
+  if (!is_mounted())
     return -ENOTCONN;
 
   if (std::string(relpath) == "/")
@@ -6856,6 +6913,8 @@ int Client::rmdir(const char *relpath, const UserPerm& perms)
   string name = path.last_dentry();
   path.pop_dentry();
   InodeRef dir;
+
+  std::lock_guard lock(client_lock);
   int r = path_walk(path, &dir, perms);
   if (r < 0)
     return r;
@@ -6869,13 +6928,13 @@ int Client::rmdir(const char *relpath, const UserPerm& perms)
 
 int Client::mknod(const char *relpath, mode_t mode, const UserPerm& perms, dev_t rdev) 
 { 
-  std::lock_guard lock(client_lock);
   tout(cct) << __func__ << std::endl;
   tout(cct) << relpath << std::endl;
   tout(cct) << mode << std::endl;
   tout(cct) << rdev << std::endl;
 
-  if (unmounting)
+  destructive_lock_ref_t ulr(this, Client::STATE_UNMOUNTING);
+  if (!is_mounted())
     return -ENOTCONN;
 
   if (std::string(relpath) == "/")
@@ -6885,6 +6944,8 @@ int Client::mknod(const char *relpath, mode_t mode, const UserPerm& perms, dev_t
   string name = path.last_dentry();
   path.pop_dentry();
   InodeRef dir;
+
+  std::lock_guard lock(client_lock);
   int r = path_walk(path, &dir, perms);
   if (r < 0)
     return r;
@@ -6900,12 +6961,12 @@ int Client::mknod(const char *relpath, mode_t mode, const UserPerm& perms, dev_t
   
 int Client::symlink(const char *target, const char *relpath, const UserPerm& perms)
 {
-  std::lock_guard lock(client_lock);
   tout(cct) << __func__ << std::endl;
   tout(cct) << target << std::endl;
   tout(cct) << relpath << std::endl;
 
-  if (unmounting)
+  destructive_lock_ref_t ulr(this, Client::STATE_UNMOUNTING);
+  if (!is_mounted())
     return -ENOTCONN;
 
   if (std::string(relpath) == "/")
@@ -6915,6 +6976,8 @@ int Client::symlink(const char *target, const char *relpath, const UserPerm& per
   string name = path.last_dentry();
   path.pop_dentry();
   InodeRef dir;
+
+  std::lock_guard lock(client_lock);
   int r = path_walk(path, &dir, perms);
   if (r < 0)
     return r;
@@ -6928,15 +6991,16 @@ int Client::symlink(const char *target, const char *relpath, const UserPerm& per
 
 int Client::readlink(const char *relpath, char *buf, loff_t size, const UserPerm& perms)
 {
-  std::lock_guard lock(client_lock);
   tout(cct) << __func__ << std::endl;
   tout(cct) << relpath << std::endl;
 
-  if (unmounting)
+  destructive_lock_ref_t ulr(this, Client::STATE_UNMOUNTING);
+  if (!is_mounted())
     return -ENOTCONN;
 
   filepath path(relpath);
   InodeRef in;
+  std::lock_guard lock(client_lock);
   int r = path_walk(path, &in, perms, false);
   if (r < 0)
     return r;
@@ -7234,16 +7298,17 @@ int Client::_setattr(InodeRef &in, struct stat *attr, int mask,
 int Client::setattr(const char *relpath, struct stat *attr, int mask,
 		    const UserPerm& perms)
 {
-  std::lock_guard lock(client_lock);
   tout(cct) << __func__ << std::endl;
   tout(cct) << relpath << std::endl;
   tout(cct) << mask  << std::endl;
 
-  if (unmounting)
+  destructive_lock_ref_t ulr(this, Client::STATE_UNMOUNTING);
+  if (!is_mounted())
     return -ENOTCONN;
 
   filepath path(relpath);
   InodeRef in;
+  std::lock_guard lock(client_lock);
   int r = path_walk(path, &in, perms);
   if (r < 0)
     return r;
@@ -7253,16 +7318,17 @@ int Client::setattr(const char *relpath, struct stat *attr, int mask,
 int Client::setattrx(const char *relpath, struct ceph_statx *stx, int mask,
 		     const UserPerm& perms, int flags)
 {
-  std::lock_guard lock(client_lock);
   tout(cct) << __func__ << std::endl;
   tout(cct) << relpath << std::endl;
   tout(cct) << mask  << std::endl;
 
-  if (unmounting)
+  destructive_lock_ref_t ulr(this, Client::STATE_UNMOUNTING);
+  if (!is_mounted())
     return -ENOTCONN;
 
   filepath path(relpath);
   InodeRef in;
+  std::lock_guard lock(client_lock);
   int r = path_walk(path, &in, perms, !(flags & AT_SYMLINK_NOFOLLOW));
   if (r < 0)
     return r;
@@ -7271,14 +7337,15 @@ int Client::setattrx(const char *relpath, struct ceph_statx *stx, int mask,
 
 int Client::fsetattr(int fd, struct stat *attr, int mask, const UserPerm& perms)
 {
-  std::lock_guard lock(client_lock);
   tout(cct) << __func__ << std::endl;
   tout(cct) << fd << std::endl;
   tout(cct) << mask  << std::endl;
 
-  if (unmounting)
+  destructive_lock_ref_t ulr(this, Client::STATE_UNMOUNTING);
+  if (!is_mounted())
     return -ENOTCONN;
 
+  std::lock_guard lock(client_lock);
   Fh *f = get_filehandle(fd);
   if (!f)
     return -EBADF;
@@ -7291,14 +7358,15 @@ int Client::fsetattr(int fd, struct stat *attr, int mask, const UserPerm& perms)
 
 int Client::fsetattrx(int fd, struct ceph_statx *stx, int mask, const UserPerm& perms)
 {
-  std::lock_guard lock(client_lock);
   tout(cct) << __func__ << std::endl;
   tout(cct) << fd << std::endl;
   tout(cct) << mask  << std::endl;
 
-  if (unmounting)
+  destructive_lock_ref_t ulr(this, Client::STATE_UNMOUNTING);
+  if (!is_mounted())
     return -ENOTCONN;
 
+  std::lock_guard lock(client_lock);
   Fh *f = get_filehandle(fd);
   if (!f)
     return -EBADF;
@@ -7313,15 +7381,16 @@ int Client::stat(const char *relpath, struct stat *stbuf, const UserPerm& perms,
 		 frag_info_t *dirstat, int mask)
 {
   ldout(cct, 3) << __func__ << " enter (relpath " << relpath << " mask " << mask << ")" << dendl;
-  std::lock_guard lock(client_lock);
   tout(cct) << "stat" << std::endl;
   tout(cct) << relpath << std::endl;
 
-  if (unmounting)
+  destructive_lock_ref_t ulr(this, Client::STATE_UNMOUNTING);
+  if (!is_mounted())
     return -ENOTCONN;
 
   filepath path(relpath);
   InodeRef in;
+  std::lock_guard lock(client_lock);
   int r = path_walk(path, &in, perms, true, mask);
   if (r < 0)
     return r;
@@ -7362,11 +7431,11 @@ int Client::statx(const char *relpath, struct ceph_statx *stx,
 		  unsigned int want, unsigned int flags)
 {
   ldout(cct, 3) << __func__ << " enter (relpath " << relpath << " want " << want << ")" << dendl;
-  std::lock_guard lock(client_lock);
   tout(cct) << "statx" << std::endl;
   tout(cct) << relpath << std::endl;
 
-  if (unmounting)
+  destructive_lock_ref_t ulr(this, Client::STATE_UNMOUNTING);
+  if (!is_mounted())
     return -ENOTCONN;
 
   filepath path(relpath);
@@ -7374,6 +7443,7 @@ int Client::statx(const char *relpath, struct ceph_statx *stx,
 
   unsigned mask = statx_to_mask(flags, want);
 
+  std::lock_guard lock(client_lock);
   int r = path_walk(path, &in, perms, !(flags & AT_SYMLINK_NOFOLLOW), mask);
   if (r < 0)
     return r;
@@ -7393,15 +7463,16 @@ int Client::lstat(const char *relpath, struct stat *stbuf,
 		  const UserPerm& perms, frag_info_t *dirstat, int mask)
 {
   ldout(cct, 3) << __func__ << " enter (relpath " << relpath << " mask " << mask << ")" << dendl;
-  std::lock_guard lock(client_lock);
   tout(cct) << __func__ << std::endl;
   tout(cct) << relpath << std::endl;
 
-  if (unmounting)
+  destructive_lock_ref_t ulr(this, Client::STATE_UNMOUNTING);
+  if (!is_mounted())
     return -ENOTCONN;
 
   filepath path(relpath);
   InodeRef in;
+  std::lock_guard lock(client_lock);
   // don't follow symlinks
   int r = path_walk(path, &in, perms, false, mask);
   if (r < 0)
@@ -7568,16 +7639,17 @@ void Client::touch_dn(Dentry *dn)
 
 int Client::chmod(const char *relpath, mode_t mode, const UserPerm& perms)
 {
-  std::lock_guard lock(client_lock);
   tout(cct) << __func__ << std::endl;
   tout(cct) << relpath << std::endl;
   tout(cct) << mode << std::endl;
 
-  if (unmounting)
+  destructive_lock_ref_t ulr(this, Client::STATE_UNMOUNTING);
+  if (!is_mounted())
     return -ENOTCONN;
 
   filepath path(relpath);
   InodeRef in;
+  std::lock_guard lock(client_lock);
   int r = path_walk(path, &in, perms);
   if (r < 0)
     return r;
@@ -7588,14 +7660,15 @@ int Client::chmod(const char *relpath, mode_t mode, const UserPerm& perms)
 
 int Client::fchmod(int fd, mode_t mode, const UserPerm& perms)
 {
-  std::lock_guard lock(client_lock);
   tout(cct) << __func__ << std::endl;
   tout(cct) << fd << std::endl;
   tout(cct) << mode << std::endl;
 
-  if (unmounting)
+  destructive_lock_ref_t ulr(this, Client::STATE_UNMOUNTING);
+  if (!is_mounted())
     return -ENOTCONN;
 
+  std::lock_guard lock(client_lock);
   Fh *f = get_filehandle(fd);
   if (!f)
     return -EBADF;
@@ -7610,16 +7683,17 @@ int Client::fchmod(int fd, mode_t mode, const UserPerm& perms)
 
 int Client::lchmod(const char *relpath, mode_t mode, const UserPerm& perms)
 {
-  std::lock_guard lock(client_lock);
   tout(cct) << __func__ << std::endl;
   tout(cct) << relpath << std::endl;
   tout(cct) << mode << std::endl;
 
-  if (unmounting)
+  destructive_lock_ref_t ulr(this, Client::STATE_UNMOUNTING);
+  if (!is_mounted())
     return -ENOTCONN;
 
   filepath path(relpath);
   InodeRef in;
+  std::lock_guard lock(client_lock);
   // don't follow symlinks
   int r = path_walk(path, &in, perms, false);
   if (r < 0)
@@ -7632,17 +7706,18 @@ int Client::lchmod(const char *relpath, mode_t mode, const UserPerm& perms)
 int Client::chown(const char *relpath, uid_t new_uid, gid_t new_gid,
 		  const UserPerm& perms)
 {
-  std::lock_guard lock(client_lock);
   tout(cct) << __func__ << std::endl;
   tout(cct) << relpath << std::endl;
   tout(cct) << new_uid << std::endl;
   tout(cct) << new_gid << std::endl;
 
-  if (unmounting)
+  destructive_lock_ref_t ulr(this, Client::STATE_UNMOUNTING);
+  if (!is_mounted())
     return -ENOTCONN;
 
   filepath path(relpath);
   InodeRef in;
+  std::lock_guard lock(client_lock);
   int r = path_walk(path, &in, perms);
   if (r < 0)
     return r;
@@ -7654,15 +7729,16 @@ int Client::chown(const char *relpath, uid_t new_uid, gid_t new_gid,
 
 int Client::fchown(int fd, uid_t new_uid, gid_t new_gid, const UserPerm& perms)
 {
-  std::lock_guard lock(client_lock);
   tout(cct) << __func__ << std::endl;
   tout(cct) << fd << std::endl;
   tout(cct) << new_uid << std::endl;
   tout(cct) << new_gid << std::endl;
 
-  if (unmounting)
+  destructive_lock_ref_t ulr(this, Client::STATE_UNMOUNTING);
+  if (!is_mounted())
     return -ENOTCONN;
 
+  std::lock_guard lock(client_lock);
   Fh *f = get_filehandle(fd);
   if (!f)
     return -EBADF;
@@ -7682,17 +7758,18 @@ int Client::fchown(int fd, uid_t new_uid, gid_t new_gid, const UserPerm& perms)
 int Client::lchown(const char *relpath, uid_t new_uid, gid_t new_gid,
 		   const UserPerm& perms)
 {
-  std::lock_guard lock(client_lock);
   tout(cct) << __func__ << std::endl;
   tout(cct) << relpath << std::endl;
   tout(cct) << new_uid << std::endl;
   tout(cct) << new_gid << std::endl;
 
-  if (unmounting)
+  destructive_lock_ref_t ulr(this, Client::STATE_UNMOUNTING);
+  if (!is_mounted())
     return -ENOTCONN;
 
   filepath path(relpath);
   InodeRef in;
+  std::lock_guard lock(client_lock);
   // don't follow symlinks
   int r = path_walk(path, &in, perms, false);
   if (r < 0)
@@ -7757,7 +7834,6 @@ int Client::futime(int fd, struct utimbuf *buf, const UserPerm& perms)
 int Client::utimes(const char *relpath, struct timeval times[2],
                    const UserPerm& perms)
 {
-  std::lock_guard lock(client_lock);
   tout(cct) << __func__ << std::endl;
   tout(cct) << relpath << std::endl;
   tout(cct) << "atime: " << times[0].tv_sec << "." << times[0].tv_usec
@@ -7765,11 +7841,13 @@ int Client::utimes(const char *relpath, struct timeval times[2],
   tout(cct) << "mtime: " << times[1].tv_sec << "." << times[1].tv_usec
             << std::endl;
 
-  if (unmounting)
+  destructive_lock_ref_t ulr(this, Client::STATE_UNMOUNTING);
+  if (!is_mounted())
     return -ENOTCONN;
 
   filepath path(relpath);
   InodeRef in;
+  std::lock_guard lock(client_lock);
   int r = path_walk(path, &in, perms);
   if (r < 0)
     return r;
@@ -7784,7 +7862,6 @@ int Client::utimes(const char *relpath, struct timeval times[2],
 int Client::lutimes(const char *relpath, struct timeval times[2],
                     const UserPerm& perms)
 {
-  std::lock_guard lock(client_lock);
   tout(cct) << __func__ << std::endl;
   tout(cct) << relpath << std::endl;
   tout(cct) << "atime: " << times[0].tv_sec << "." << times[0].tv_usec
@@ -7792,11 +7869,13 @@ int Client::lutimes(const char *relpath, struct timeval times[2],
   tout(cct) << "mtime: " << times[1].tv_sec << "." << times[1].tv_usec
             << std::endl;
 
-  if (unmounting)
+  destructive_lock_ref_t ulr(this, Client::STATE_UNMOUNTING);
+  if (!is_mounted())
     return -ENOTCONN;
 
   filepath path(relpath);
   InodeRef in;
+  std::lock_guard lock(client_lock);
   int r = path_walk(path, &in, perms, false);
   if (r < 0)
     return r;
@@ -7821,7 +7900,6 @@ int Client::futimes(int fd, struct timeval times[2], const UserPerm& perms)
 
 int Client::futimens(int fd, struct timespec times[2], const UserPerm& perms)
 {
-  std::lock_guard lock(client_lock);
   tout(cct) << __func__ << std::endl;
   tout(cct) << fd << std::endl;
   tout(cct) << "atime: " << times[0].tv_sec << "." << times[0].tv_nsec
@@ -7829,9 +7907,11 @@ int Client::futimens(int fd, struct timespec times[2], const UserPerm& perms)
   tout(cct) << "mtime: " << times[1].tv_sec << "." << times[1].tv_nsec
             << std::endl;
 
-  if (unmounting)
+  destructive_lock_ref_t ulr(this, Client::STATE_UNMOUNTING);
+  if (!is_mounted())
     return -ENOTCONN;
 
+  std::lock_guard lock(client_lock);
   Fh *f = get_filehandle(fd);
   if (!f)
     return -EBADF;
@@ -7849,15 +7929,16 @@ int Client::futimens(int fd, struct timespec times[2], const UserPerm& perms)
 
 int Client::flock(int fd, int operation, uint64_t owner)
 {
-  std::lock_guard lock(client_lock);
   tout(cct) << __func__ << std::endl;
   tout(cct) << fd << std::endl;
   tout(cct) << operation << std::endl;
   tout(cct) << owner << std::endl;
 
-  if (unmounting)
+  destructive_lock_ref_t ulr(this, Client::STATE_UNMOUNTING);
+  if (!is_mounted())
     return -ENOTCONN;
 
+  std::lock_guard lock(client_lock);
   Fh *f = get_filehandle(fd);
   if (!f)
     return -EBADF;
@@ -7867,15 +7948,16 @@ int Client::flock(int fd, int operation, uint64_t owner)
 
 int Client::opendir(const char *relpath, dir_result_t **dirpp, const UserPerm& perms)
 {
-  std::lock_guard lock(client_lock);
   tout(cct) << __func__ << std::endl;
   tout(cct) << relpath << std::endl;
 
-  if (unmounting)
+  destructive_lock_ref_t ulr(this, Client::STATE_UNMOUNTING);
+  if (!is_mounted())
     return -ENOTCONN;
 
   filepath path(relpath);
   InodeRef in;
+  std::lock_guard lock(client_lock);
   int r = path_walk(path, &in, perms, true);
   if (r < 0)
     return r;
@@ -7927,12 +8009,13 @@ void Client::_closedir(dir_result_t *dirp)
 
 void Client::rewinddir(dir_result_t *dirp)
 {
-  std::lock_guard lock(client_lock);
   ldout(cct, 3) << __func__ << "(" << dirp << ")" << dendl;
 
-  if (unmounting)
+  destructive_lock_ref_t ulr(this, Client::STATE_UNMOUNTING);
+  if (!is_mounted())
     return;
 
+  std::lock_guard lock(client_lock);
   dir_result_t *d = static_cast<dir_result_t*>(dirp);
   _readdir_drop_dirp_buffer(d);
   d->reset();
@@ -7947,12 +8030,13 @@ loff_t Client::telldir(dir_result_t *dirp)
 
 void Client::seekdir(dir_result_t *dirp, loff_t offset)
 {
-  std::lock_guard lock(client_lock);
-
   ldout(cct, 3) << __func__ << "(" << dirp << ", " << offset << ")" << dendl;
 
-  if (unmounting)
+  destructive_lock_ref_t ulr(this, Client::STATE_UNMOUNTING);
+  if (!is_mounted())
     return;
+
+  std::lock_guard lock(client_lock);
 
   if (offset == dirp->offset)
     return;
@@ -8208,10 +8292,11 @@ int Client::readdir_r_cb(dir_result_t *d, add_dirent_cb_t cb, void *p,
 {
   int caps = statx_to_mask(flags, want);
 
-  std::lock_guard lock(client_lock);
-
-  if (unmounting)
+  destructive_lock_ref_t ulr(this, Client::STATE_UNMOUNTING);
+  if (!is_mounted())
     return -ENOTCONN;
+
+  std::lock_guard lock(client_lock);
 
   dir_result_t *dirp = static_cast<dir_result_t*>(d);
 
@@ -8585,12 +8670,12 @@ int Client::open(const char *relpath, int flags, const UserPerm& perms,
 		 int object_size, const char *data_pool)
 {
   ldout(cct, 3) << "open enter(" << relpath << ", " << ceph_flags_sys2wire(flags) << "," << mode << ")" << dendl;
-  std::lock_guard lock(client_lock);
   tout(cct) << "open" << std::endl;
   tout(cct) << relpath << std::endl;
   tout(cct) << ceph_flags_sys2wire(flags) << std::endl;
 
-  if (unmounting)
+  destructive_lock_ref_t ulr(this, Client::STATE_UNMOUNTING);
+  if (!is_mounted())
     return -ENOTCONN;
 
   Fh *fh = NULL;
@@ -8608,6 +8693,8 @@ int Client::open(const char *relpath, int flags, const UserPerm& perms,
   bool created = false;
   /* O_CREATE with O_EXCL enforces O_NOFOLLOW. */
   bool followsym = !((flags & O_NOFOLLOW) || ((flags & O_CREAT) && (flags & O_EXCL)));
+
+  std::lock_guard lock(client_lock);
   int r = path_walk(path, &in, perms, followsym, ceph_caps_for_mode(mode));
 
   if (r == 0 && (flags & O_CREAT) && (flags & O_EXCL))
@@ -8674,12 +8761,13 @@ int Client::open(const char *relpath, int flags, const UserPerm& perms, mode_t m
 int Client::lookup_hash(inodeno_t ino, inodeno_t dirino, const char *name,
 			const UserPerm& perms)
 {
-  std::lock_guard lock(client_lock);
   ldout(cct, 3) << __func__ << " enter(" << ino << ", #" << dirino << "/" << name << ")" << dendl;
 
-  if (unmounting)
+  destructive_lock_ref_t ulr(this, Client::STATE_UNMOUNTING);
+  if (!is_mounted())
     return -ENOTCONN;
 
+  std::lock_guard lock(client_lock);
   MetaRequest *req = new MetaRequest(CEPH_MDS_OP_LOOKUPHASH);
   filepath path(ino);
   req->set_filepath(path);
@@ -8709,7 +8797,8 @@ int Client::_lookup_ino(inodeno_t ino, const UserPerm& perms, Inode **inode)
 {
   ldout(cct, 8) << __func__ << " enter(" << ino << ")" << dendl;
 
-  if (unmounting)
+  destructive_lock_ref_t ulr(this, Client::STATE_UNMOUNTING);
+  if (!is_mounted())
     return -ENOTCONN;
 
   MetaRequest *req = new MetaRequest(CEPH_MDS_OP_LOOKUPINO);
@@ -8772,7 +8861,8 @@ int Client::_lookup_name(Inode *ino, Inode *parent, const UserPerm& perms)
   ceph_assert(parent->is_dir());
   ldout(cct, 3) << __func__ << " enter(" << ino->ino << ")" << dendl;
 
-  if (unmounting)
+  destructive_lock_ref_t ulr(this, Client::STATE_UNMOUNTING);
+  if (!is_mounted())
     return -ENOTCONN;
 
   MetaRequest *req = new MetaRequest(CEPH_MDS_OP_LOOKUPNAME);
@@ -8989,13 +9079,14 @@ int Client::_renew_caps(Inode *in)
 int Client::close(int fd)
 {
   ldout(cct, 3) << "close enter(" << fd << ")" << dendl;
-  std::lock_guard lock(client_lock);
   tout(cct) << "close" << std::endl;
   tout(cct) << fd << std::endl;
 
-  if (unmounting)
+  destructive_lock_ref_t ulr(this, Client::STATE_UNMOUNTING);
+  if (!is_mounted())
     return -ENOTCONN;
 
+  std::lock_guard lock(client_lock);
   Fh *fh = get_filehandle(fd);
   if (!fh)
     return -EBADF;
@@ -9012,15 +9103,16 @@ int Client::close(int fd)
 
 loff_t Client::lseek(int fd, loff_t offset, int whence)
 {
-  std::lock_guard lock(client_lock);
   tout(cct) << "lseek" << std::endl;
   tout(cct) << fd << std::endl;
   tout(cct) << offset << std::endl;
   tout(cct) << whence << std::endl;
 
-  if (unmounting)
+  destructive_lock_ref_t ulr(this, Client::STATE_UNMOUNTING);
+  if (!is_mounted())
     return -ENOTCONN;
 
+  std::lock_guard lock(client_lock);
   Fh *f = get_filehandle(fd);
   if (!f)
     return -EBADF;
@@ -9184,15 +9276,16 @@ int Client::uninline_data(Inode *in, Context *onfinish)
 
 int Client::read(int fd, char *buf, loff_t size, loff_t offset)
 {
-  std::unique_lock lock(client_lock);
   tout(cct) << "read" << std::endl;
   tout(cct) << fd << std::endl;
   tout(cct) << size << std::endl;
   tout(cct) << offset << std::endl;
 
-  if (unmounting)
+  destructive_lock_ref_t ulr(this, Client::STATE_UNMOUNTING);
+  if (!is_mounted())
     return -ENOTCONN;
 
+  std::unique_lock lock(client_lock);
   Fh *f = get_filehandle(fd);
   if (!f)
     return -EBADF;
@@ -9504,7 +9597,7 @@ void Client::_sync_write_commit(Inode *in)
   put_cap_ref(in, CEPH_CAP_FILE_BUFFER);
 
   ldout(cct, 15) << __func__ << " unsafe_sync_write = " << unsafe_sync_write << dendl;
-  if (unsafe_sync_write == 0 && unmounting) {
+  if (unsafe_sync_write == 0 && !is_mounted()) {
     ldout(cct, 10) << __func__ << " -- no more unsafe writes, unmount can proceed" << dendl;
     mount_cond.notify_all();
   }
@@ -9512,15 +9605,16 @@ void Client::_sync_write_commit(Inode *in)
 
 int Client::write(int fd, const char *buf, loff_t size, loff_t offset) 
 {
-  std::lock_guard lock(client_lock);
   tout(cct) << "write" << std::endl;
   tout(cct) << fd << std::endl;
   tout(cct) << size << std::endl;
   tout(cct) << offset << std::endl;
 
-  if (unmounting)
+  destructive_lock_ref_t ulr(this, Client::STATE_UNMOUNTING);
+  if (!is_mounted())
     return -ENOTCONN;
 
+  std::lock_guard lock(client_lock);
   Fh *fh = get_filehandle(fd);
   if (!fh)
     return -EBADF;
@@ -9591,13 +9685,14 @@ int64_t Client::_preadv_pwritev_locked(Fh *fh, const struct iovec *iov,
 
 int Client::_preadv_pwritev(int fd, const struct iovec *iov, unsigned iovcnt, int64_t offset, bool write)
 {
-    std::lock_guard lock(client_lock);
     tout(cct) << fd << std::endl;
     tout(cct) << offset << std::endl;
 
-    if (unmounting)
-     return -ENOTCONN;
+    destructive_lock_ref_t ulr(this, Client::STATE_UNMOUNTING);
+    if (!is_mounted())
+      return -ENOTCONN;
 
+    std::lock_guard lock(client_lock);
     Fh *fh = get_filehandle(fd);
     if (!fh)
         return -EBADF;
@@ -9860,14 +9955,15 @@ int Client::truncate(const char *relpath, loff_t length, const UserPerm& perms)
 
 int Client::ftruncate(int fd, loff_t length, const UserPerm& perms) 
 {
-  std::lock_guard lock(client_lock);
   tout(cct) << __func__ << std::endl;
   tout(cct) << fd << std::endl;
   tout(cct) << length << std::endl;
 
-  if (unmounting)
+  destructive_lock_ref_t ulr(this, Client::STATE_UNMOUNTING);
+  if (!is_mounted())
     return -ENOTCONN;
 
+  std::lock_guard lock(client_lock);
   Fh *f = get_filehandle(fd);
   if (!f)
     return -EBADF;
@@ -9882,14 +9978,15 @@ int Client::ftruncate(int fd, loff_t length, const UserPerm& perms)
 
 int Client::fsync(int fd, bool syncdataonly) 
 {
-  std::lock_guard lock(client_lock);
   tout(cct) << "fsync" << std::endl;
   tout(cct) << fd << std::endl;
   tout(cct) << syncdataonly << std::endl;
 
-  if (unmounting)
+  destructive_lock_ref_t ulr(this, Client::STATE_UNMOUNTING);
+  if (!is_mounted())
     return -ENOTCONN;
 
+  std::lock_guard lock(client_lock);
   Fh *f = get_filehandle(fd);
   if (!f)
     return -EBADF;
@@ -9991,13 +10088,14 @@ int Client::_fsync(Fh *f, bool syncdataonly)
 
 int Client::fstat(int fd, struct stat *stbuf, const UserPerm& perms, int mask)
 {
-  std::lock_guard lock(client_lock);
   tout(cct) << "fstat mask " << hex << mask << dec << std::endl;
   tout(cct) << fd << std::endl;
 
-  if (unmounting)
+  destructive_lock_ref_t ulr(this, Client::STATE_UNMOUNTING);
+  if (!is_mounted())
     return -ENOTCONN;
 
+  std::lock_guard lock(client_lock);
   Fh *f = get_filehandle(fd);
   if (!f)
     return -EBADF;
@@ -10012,12 +10110,14 @@ int Client::fstat(int fd, struct stat *stbuf, const UserPerm& perms, int mask)
 int Client::fstatx(int fd, struct ceph_statx *stx, const UserPerm& perms,
 		   unsigned int want, unsigned int flags)
 {
-  std::lock_guard lock(client_lock);
+  destructive_lock_ref_t ulr(this, Client::STATE_UNMOUNTING);
+  if (!is_mounted())
+    return -ENOTCONN;
+
   tout(cct) << "fstatx flags " << hex << flags << " want " << want << dec << std::endl;
   tout(cct) << fd << std::endl;
 
-  if (unmounting)
-    return -ENOTCONN;
+  std::lock_guard lock(client_lock);
 
   Fh *f = get_filehandle(fd);
   if (!f)
@@ -10044,12 +10144,14 @@ int Client::fstatx(int fd, struct ceph_statx *stx, const UserPerm& perms,
 int Client::chdir(const char *relpath, std::string &new_cwd,
 		  const UserPerm& perms)
 {
-  std::lock_guard lock(client_lock);
+  destructive_lock_ref_t ulr(this, Client::STATE_UNMOUNTING);
+  if (!is_mounted())
+    return -ENOTCONN;
+
   tout(cct) << "chdir" << std::endl;
   tout(cct) << relpath << std::endl;
 
-  if (unmounting)
-    return -ENOTCONN;
+  std::lock_guard lock(client_lock);
 
   filepath path(relpath);
   InodeRef in;
@@ -10110,20 +10212,25 @@ void Client::_getcwd(string& dir, const UserPerm& perms)
 
 void Client::getcwd(string& dir, const UserPerm& perms)
 {
+  destructive_lock_ref_t ulr(this, Client::STATE_UNMOUNTING);
+  if (!is_mounted())
+    return;
+
   std::lock_guard l(client_lock);
-  if (!unmounting)
-    _getcwd(dir, perms);
+
+  _getcwd(dir, perms);
 }
 
 int Client::statfs(const char *path, struct statvfs *stbuf,
 		   const UserPerm& perms)
 {
-  std::lock_guard l(client_lock);
   tout(cct) << __func__ << std::endl;
   unsigned long int total_files_on_fs;
-
-  if (unmounting)
+  destructive_lock_ref_t ulr(this, Client::STATE_UNMOUNTING);
+  if (!is_mounted())
     return -ENOTCONN;
+
+  std::lock_guard l(client_lock);
 
   ceph_statfs stats;
   C_SaferCond cond;
@@ -10579,6 +10686,10 @@ int Client::test_dentry_handling(bool can_invalidate)
 {
   int r = 0;
 
+  destructive_lock_ref_t dlr(this, Client::STATE_NEW);
+  if (!is_initialized())
+    return -ENOTCONN;
+
   can_invalidate_dentries = can_invalidate;
 
   if (can_invalidate_dentries) {
@@ -10627,10 +10738,11 @@ int Client::_sync_fs()
 
 int Client::sync_fs()
 {
-  std::lock_guard l(client_lock);
-
-  if (unmounting)
+  destructive_lock_ref_t ulr(this, Client::STATE_UNMOUNTING);
+  if (!is_mounted())
     return -ENOTCONN;
+
+  std::lock_guard l(client_lock);
 
   return _sync_fs();
 }
@@ -10726,10 +10838,11 @@ int Client::lazyio_synchronize(int fd, loff_t offset, size_t count)
 
 int Client::mksnap(const char *relpath, const char *name, const UserPerm& perm)
 {
-  std::lock_guard l(client_lock);
-
-  if (unmounting)
+  destructive_lock_ref_t ulr(this, Client::STATE_UNMOUNTING);
+  if (!is_mounted())
     return -ENOTCONN;
+
+  std::lock_guard l(client_lock);
 
   filepath path(relpath);
   InodeRef in;
@@ -10747,10 +10860,11 @@ int Client::mksnap(const char *relpath, const char *name, const UserPerm& perm)
 
 int Client::rmsnap(const char *relpath, const char *name, const UserPerm& perms)
 {
-  std::lock_guard l(client_lock);
-
-  if (unmounting)
+  destructive_lock_ref_t ulr(this, Client::STATE_UNMOUNTING);
+  if (!is_mounted())
     return -ENOTCONN;
+
+  std::lock_guard l(client_lock);
 
   filepath path(relpath);
   InodeRef in;
@@ -10769,12 +10883,13 @@ int Client::rmsnap(const char *relpath, const char *name, const UserPerm& perms)
 // =============================
 // expose caps
 
-int Client::get_caps_issued(int fd) {
+int Client::get_caps_issued(int fd)
+{
+  destructive_lock_ref_t ulr(this, Client::STATE_UNMOUNTING);
+  if (!is_mounted())
+    return -ENOTCONN;
 
   std::lock_guard lock(client_lock);
-
-  if (unmounting)
-    return -ENOTCONN;
 
   Fh *f = get_filehandle(fd);
   if (!f)
@@ -10785,10 +10900,11 @@ int Client::get_caps_issued(int fd) {
 
 int Client::get_caps_issued(const char *path, const UserPerm& perms)
 {
-  std::lock_guard lock(client_lock);
-
-  if (unmounting)
+  destructive_lock_ref_t ulr(this, Client::STATE_UNMOUNTING);
+  if (!is_mounted())
     return -ENOTCONN;
+
+  std::lock_guard lock(client_lock);
 
   filepath p(path);
   InodeRef in;
@@ -10838,14 +10954,15 @@ Inode *Client::open_snapdir(Inode *diri)
 int Client::ll_lookup(Inode *parent, const char *name, struct stat *attr,
 		      Inode **out, const UserPerm& perms)
 {
+  destructive_lock_ref_t ulr(this, Client::STATE_UNMOUNTING);
+  if (!is_mounted())
+    return -ENOTCONN;
+
   std::lock_guard lock(client_lock);
   vinodeno_t vparent = _get_vino(parent);
   ldout(cct, 3) << __func__ << " " << vparent << " " << name << dendl;
   tout(cct) << __func__ << std::endl;
   tout(cct) << name << std::endl;
-
-  if (unmounting)
-    return -ENOTCONN;
 
   int r = 0;
   if (!fuse_default_permissions) {
@@ -10883,11 +11000,12 @@ int Client::ll_lookup_inode(
     Inode **inode)
 {
   ceph_assert(inode != NULL);
+  destructive_lock_ref_t ulr(this, Client::STATE_UNMOUNTING);
+  if (!is_mounted())
+    return -ENOTCONN;
+
   std::lock_guard lock(client_lock);
   ldout(cct, 3) << "ll_lookup_inode " << ino  << dendl;
-   
-  if (unmounting)
-    return -ENOTCONN;
 
   // Num1: get inode and *inode
   int r = _lookup_ino(ino, perms, inode);
@@ -10933,14 +11051,15 @@ int Client::ll_lookupx(Inode *parent, const char *name, Inode **out,
 		       struct ceph_statx *stx, unsigned want, unsigned flags,
 		       const UserPerm& perms)
 {
+  destructive_lock_ref_t ulr(this, Client::STATE_UNMOUNTING);
+  if (!is_mounted())
+    return -ENOTCONN;
+
   std::lock_guard lock(client_lock);
   vinodeno_t vparent = _get_vino(parent);
   ldout(cct, 3) << __func__ << " " << vparent << " " << name << dendl;
   tout(cct) << "ll_lookupx" << std::endl;
   tout(cct) << name << std::endl;
-
-  if (unmounting)
-    return -ENOTCONN;
 
   int r = 0;
   if (!fuse_default_permissions) {
@@ -10973,10 +11092,11 @@ int Client::ll_lookupx(Inode *parent, const char *name, Inode **out,
 int Client::ll_walk(const char* name, Inode **out, struct ceph_statx *stx,
 		    unsigned int want, unsigned int flags, const UserPerm& perms)
 {
-  std::lock_guard lock(client_lock);
-
-  if (unmounting)
+  destructive_lock_ref_t ulr(this, Client::STATE_UNMOUNTING);
+  if (!is_mounted())
     return -ENOTCONN;
+
+  std::lock_guard lock(client_lock);
 
   filepath fp(name, 0);
   InodeRef in;
@@ -11069,7 +11189,8 @@ bool Client::_ll_forget(Inode *in, uint64_t count)
   tout(cct) << count << std::endl;
 
   // Ignore forget if we're no longer mounted
-  if (unmounting)
+  destructive_lock_ref_t ulr(this, Client::STATE_UNMOUNTING);
+  if (!is_mounted())
     return true;
 
   if (ino == 1) return true;  // ignore forget on root.
@@ -11117,10 +11238,11 @@ snapid_t Client::ll_get_snapid(Inode *in)
 
 Inode *Client::ll_get_inode(ino_t ino)
 {
-  std::lock_guard lock(client_lock);
-
-  if (unmounting)
+  destructive_lock_ref_t ulr(this, Client::STATE_UNMOUNTING);
+  if (!is_mounted())
     return NULL;
+
+  std::lock_guard lock(client_lock);
 
   vinodeno_t vino = _map_faked_ino(ino);
   unordered_map<vinodeno_t,Inode*>::iterator p = inode_map.find(vino);
@@ -11133,10 +11255,11 @@ Inode *Client::ll_get_inode(ino_t ino)
 
 Inode *Client::ll_get_inode(vinodeno_t vino)
 {
-  std::lock_guard lock(client_lock);
-
-  if (unmounting)
+  destructive_lock_ref_t ulr(this, Client::STATE_UNMOUNTING);
+  if (!is_mounted())
     return NULL;
+
+  std::lock_guard lock(client_lock);
 
   unordered_map<vinodeno_t,Inode*>::iterator p = inode_map.find(vino);
   if (p == inode_map.end())
@@ -11162,10 +11285,11 @@ int Client::_ll_getattr(Inode *in, int caps, const UserPerm& perms)
 
 int Client::ll_getattr(Inode *in, struct stat *attr, const UserPerm& perms)
 {
-  std::lock_guard lock(client_lock);
-
-  if (unmounting)
+  destructive_lock_ref_t ulr(this, Client::STATE_UNMOUNTING);
+  if (!is_mounted())
     return -ENOTCONN;
+
+  std::lock_guard lock(client_lock);
 
   int res = _ll_getattr(in, CEPH_STAT_CAP_INODE_ALL, perms);
 
@@ -11178,10 +11302,11 @@ int Client::ll_getattr(Inode *in, struct stat *attr, const UserPerm& perms)
 int Client::ll_getattrx(Inode *in, struct ceph_statx *stx, unsigned int want,
 			unsigned int flags, const UserPerm& perms)
 {
-  std::lock_guard lock(client_lock);
-
-  if (unmounting)
+  destructive_lock_ref_t ulr(this, Client::STATE_UNMOUNTING);
+  if (!is_mounted())
     return -ENOTCONN;
+
+  std::lock_guard lock(client_lock);
 
   int res = 0;
   unsigned mask = statx_to_mask(flags, want);
@@ -11227,10 +11352,11 @@ int Client::_ll_setattrx(Inode *in, struct ceph_statx *stx, int mask,
 int Client::ll_setattrx(Inode *in, struct ceph_statx *stx, int mask,
 			const UserPerm& perms)
 {
-  std::lock_guard lock(client_lock);
-
-  if (unmounting)
+  destructive_lock_ref_t ulr(this, Client::STATE_UNMOUNTING);
+  if (!is_mounted())
     return -ENOTCONN;
+
+  std::lock_guard lock(client_lock);
 
   InodeRef target(in);
   int res = _ll_setattrx(in, stx, mask, perms, &target);
@@ -11249,10 +11375,11 @@ int Client::ll_setattr(Inode *in, struct stat *attr, int mask,
   struct ceph_statx stx;
   stat_to_statx(attr, &stx);
 
-  std::lock_guard lock(client_lock);
-
-  if (unmounting)
+  destructive_lock_ref_t ulr(this, Client::STATE_UNMOUNTING);
+  if (!is_mounted())
     return -ENOTCONN;
+
+  std::lock_guard lock(client_lock);
 
   InodeRef target(in);
   int res = _ll_setattrx(in, &stx, mask, perms, &target);
@@ -11272,10 +11399,11 @@ int Client::ll_setattr(Inode *in, struct stat *attr, int mask,
 int Client::getxattr(const char *path, const char *name, void *value, size_t size,
 		     const UserPerm& perms)
 {
-  std::lock_guard lock(client_lock);
-
-  if (unmounting)
+  destructive_lock_ref_t ulr(this, Client::STATE_UNMOUNTING);
+  if (!is_mounted())
     return -ENOTCONN;
+
+  std::lock_guard lock(client_lock);
 
   InodeRef in;
   int r = Client::path_walk(path, &in, perms, true, CEPH_STAT_CAP_XATTR);
@@ -11287,10 +11415,11 @@ int Client::getxattr(const char *path, const char *name, void *value, size_t siz
 int Client::lgetxattr(const char *path, const char *name, void *value, size_t size,
 		      const UserPerm& perms)
 {
-  std::lock_guard lock(client_lock);
-
-  if (unmounting)
+  destructive_lock_ref_t ulr(this, Client::STATE_UNMOUNTING);
+  if (!is_mounted())
     return -ENOTCONN;
+
+  std::lock_guard lock(client_lock);
 
   InodeRef in;
   int r = Client::path_walk(path, &in, perms, false, CEPH_STAT_CAP_XATTR);
@@ -11302,10 +11431,11 @@ int Client::lgetxattr(const char *path, const char *name, void *value, size_t si
 int Client::fgetxattr(int fd, const char *name, void *value, size_t size,
 		      const UserPerm& perms)
 {
-  std::lock_guard lock(client_lock);
-
-  if (unmounting)
+  destructive_lock_ref_t ulr(this, Client::STATE_UNMOUNTING);
+  if (!is_mounted())
     return -ENOTCONN;
+
+  std::lock_guard lock(client_lock);
 
   Fh *f = get_filehandle(fd);
   if (!f)
@@ -11316,10 +11446,11 @@ int Client::fgetxattr(int fd, const char *name, void *value, size_t size,
 int Client::listxattr(const char *path, char *list, size_t size,
 		      const UserPerm& perms)
 {
-  std::lock_guard lock(client_lock);
-
-  if (unmounting)
+  destructive_lock_ref_t ulr(this, Client::STATE_UNMOUNTING);
+  if (!is_mounted())
     return -ENOTCONN;
+
+  std::lock_guard lock(client_lock);
 
   InodeRef in;
   int r = Client::path_walk(path, &in, perms, true, CEPH_STAT_CAP_XATTR);
@@ -11331,10 +11462,11 @@ int Client::listxattr(const char *path, char *list, size_t size,
 int Client::llistxattr(const char *path, char *list, size_t size,
 		       const UserPerm& perms)
 {
-  std::lock_guard lock(client_lock);
-
-  if (unmounting)
+  destructive_lock_ref_t ulr(this, Client::STATE_UNMOUNTING);
+  if (!is_mounted())
     return -ENOTCONN;
+
+  std::lock_guard lock(client_lock);
 
   InodeRef in;
   int r = Client::path_walk(path, &in, perms, false, CEPH_STAT_CAP_XATTR);
@@ -11345,10 +11477,11 @@ int Client::llistxattr(const char *path, char *list, size_t size,
 
 int Client::flistxattr(int fd, char *list, size_t size, const UserPerm& perms)
 {
-  std::lock_guard lock(client_lock);
-
-  if (unmounting)
+  destructive_lock_ref_t ulr(this, Client::STATE_UNMOUNTING);
+  if (!is_mounted())
     return -ENOTCONN;
+
+  std::lock_guard lock(client_lock);
 
   Fh *f = get_filehandle(fd);
   if (!f)
@@ -11359,10 +11492,11 @@ int Client::flistxattr(int fd, char *list, size_t size, const UserPerm& perms)
 int Client::removexattr(const char *path, const char *name,
 			const UserPerm& perms)
 {
-  std::lock_guard lock(client_lock);
-
-  if (unmounting)
+  destructive_lock_ref_t ulr(this, Client::STATE_UNMOUNTING);
+  if (!is_mounted())
     return -ENOTCONN;
+
+  std::lock_guard lock(client_lock);
 
   InodeRef in;
   int r = Client::path_walk(path, &in, perms, true);
@@ -11374,10 +11508,11 @@ int Client::removexattr(const char *path, const char *name,
 int Client::lremovexattr(const char *path, const char *name,
 			 const UserPerm& perms)
 {
-  std::lock_guard lock(client_lock);
-
-  if (unmounting)
+  destructive_lock_ref_t ulr(this, Client::STATE_UNMOUNTING);
+  if (!is_mounted())
     return -ENOTCONN;
+
+  std::lock_guard lock(client_lock);
 
   InodeRef in;
   int r = Client::path_walk(path, &in, perms, false);
@@ -11388,10 +11523,11 @@ int Client::lremovexattr(const char *path, const char *name,
 
 int Client::fremovexattr(int fd, const char *name, const UserPerm& perms)
 {
-  std::lock_guard lock(client_lock);
-
-  if (unmounting)
+  destructive_lock_ref_t ulr(this, Client::STATE_UNMOUNTING);
+  if (!is_mounted())
     return -ENOTCONN;
+
+  std::lock_guard lock(client_lock);
 
   Fh *f = get_filehandle(fd);
   if (!f)
@@ -11404,10 +11540,11 @@ int Client::setxattr(const char *path, const char *name, const void *value,
 {
   _setxattr_maybe_wait_for_osdmap(name, value, size);
 
-  std::lock_guard lock(client_lock);
-
-  if (unmounting)
+  destructive_lock_ref_t ulr(this, Client::STATE_UNMOUNTING);
+  if (!is_mounted())
     return -ENOTCONN;
+
+  std::lock_guard lock(client_lock);
 
   InodeRef in;
   int r = Client::path_walk(path, &in, perms, true);
@@ -11421,10 +11558,11 @@ int Client::lsetxattr(const char *path, const char *name, const void *value,
 {
   _setxattr_maybe_wait_for_osdmap(name, value, size);
 
-  std::lock_guard lock(client_lock);
-
-  if (unmounting)
+  destructive_lock_ref_t ulr(this, Client::STATE_UNMOUNTING);
+  if (!is_mounted())
     return -ENOTCONN;
+
+  std::lock_guard lock(client_lock);
 
   InodeRef in;
   int r = Client::path_walk(path, &in, perms, false);
@@ -11438,10 +11576,11 @@ int Client::fsetxattr(int fd, const char *name, const void *value, size_t size,
 {
   _setxattr_maybe_wait_for_osdmap(name, value, size);
 
-  std::lock_guard lock(client_lock);
-
-  if (unmounting)
+  destructive_lock_ref_t ulr(this, Client::STATE_UNMOUNTING);
+  if (!is_mounted())
     return -ENOTCONN;
+
+  std::lock_guard lock(client_lock);
 
   Fh *f = get_filehandle(fd);
   if (!f)
@@ -11526,10 +11665,11 @@ int Client::_getxattr(InodeRef &in, const char *name, void *value, size_t size,
 int Client::ll_getxattr(Inode *in, const char *name, void *value,
 			size_t size, const UserPerm& perms)
 {
-  std::lock_guard lock(client_lock);
-
-  if (unmounting)
+  destructive_lock_ref_t ulr(this, Client::STATE_UNMOUNTING);
+  if (!is_mounted())
     return -ENOTCONN;
+
+  std::lock_guard lock(client_lock);
 
   vinodeno_t vino = _get_vino(in);
 
@@ -11580,10 +11720,11 @@ out:
 int Client::ll_listxattr(Inode *in, char *names, size_t size,
 			 const UserPerm& perms)
 {
-  std::lock_guard lock(client_lock);
-
-  if (unmounting)
+  destructive_lock_ref_t ulr(this, Client::STATE_UNMOUNTING);
+  if (!is_mounted())
     return -ENOTCONN;
+
+  std::lock_guard lock(client_lock);
 
   vinodeno_t vino = _get_vino(in);
 
@@ -11785,10 +11926,11 @@ int Client::ll_setxattr(Inode *in, const char *name, const void *value,
 {
   _setxattr_maybe_wait_for_osdmap(name, value, size);
 
-  std::lock_guard lock(client_lock);
-
-  if (unmounting)
+  destructive_lock_ref_t ulr(this, Client::STATE_UNMOUNTING);
+  if (!is_mounted())
     return -ENOTCONN;
+
+  std::lock_guard lock(client_lock);
 
   vinodeno_t vino = _get_vino(in);
 
@@ -11849,10 +11991,11 @@ int Client::_removexattr(InodeRef &in, const char *name, const UserPerm& perms)
 
 int Client::ll_removexattr(Inode *in, const char *name, const UserPerm& perms)
 {
-  std::lock_guard lock(client_lock);
-
-  if (unmounting)
+  destructive_lock_ref_t ulr(this, Client::STATE_UNMOUNTING);
+  if (!is_mounted())
     return -ENOTCONN;
+
+  std::lock_guard lock(client_lock);
 
   vinodeno_t vino = _get_vino(in);
 
@@ -12129,10 +12272,11 @@ const Client::VXattr *Client::_match_vxattr(Inode *in, const char *name)
 
 int Client::ll_readlink(Inode *in, char *buf, size_t buflen, const UserPerm& perms)
 {
-  std::lock_guard lock(client_lock);
-
-  if (unmounting)
+  destructive_lock_ref_t ulr(this, Client::STATE_UNMOUNTING);
+  if (!is_mounted())
     return -ENOTCONN;
+
+  std::lock_guard lock(client_lock);
 
   vinodeno_t vino = _get_vino(in);
 
@@ -12207,10 +12351,11 @@ int Client::ll_mknod(Inode *parent, const char *name, mode_t mode,
 		     dev_t rdev, struct stat *attr, Inode **out,
 		     const UserPerm& perms)
 {
-  std::lock_guard lock(client_lock);
-
-  if (unmounting)
+  destructive_lock_ref_t ulr(this, Client::STATE_UNMOUNTING);
+  if (!is_mounted())
     return -ENOTCONN;
+
+  std::lock_guard lock(client_lock);
 
   vinodeno_t vparent = _get_vino(parent);
 
@@ -12246,10 +12391,11 @@ int Client::ll_mknodx(Inode *parent, const char *name, mode_t mode,
 		      const UserPerm& perms)
 {
   unsigned caps = statx_to_mask(flags, want);
-  std::lock_guard lock(client_lock);
-
-  if (unmounting)
+  destructive_lock_ref_t ulr(this, Client::STATE_UNMOUNTING);
+  if (!is_mounted())
     return -ENOTCONN;
+
+  std::lock_guard lock(client_lock);
 
   vinodeno_t vparent = _get_vino(parent);
 
@@ -12434,10 +12580,11 @@ int Client::_mkdir(Inode *dir, const char *name, mode_t mode, const UserPerm& pe
 int Client::ll_mkdir(Inode *parent, const char *name, mode_t mode,
 		     struct stat *attr, Inode **out, const UserPerm& perm)
 {
-  std::lock_guard lock(client_lock);
-
-  if (unmounting)
+  destructive_lock_ref_t ulr(this, Client::STATE_UNMOUNTING);
+  if (!is_mounted())
     return -ENOTCONN;
+
+  std::lock_guard lock(client_lock);
 
   vinodeno_t vparent = _get_vino(parent);
 
@@ -12470,10 +12617,11 @@ int Client::ll_mkdirx(Inode *parent, const char *name, mode_t mode, Inode **out,
 		      struct ceph_statx *stx, unsigned want, unsigned flags,
 		      const UserPerm& perms)
 {
-  std::lock_guard lock(client_lock);
-
-  if (unmounting)
+  destructive_lock_ref_t ulr(this, Client::STATE_UNMOUNTING);
+  if (!is_mounted())
     return -ENOTCONN;
+
+  std::lock_guard lock(client_lock);
 
   vinodeno_t vparent = _get_vino(parent);
 
@@ -12554,10 +12702,11 @@ int Client::_symlink(Inode *dir, const char *name, const char *target,
 int Client::ll_symlink(Inode *parent, const char *name, const char *value,
 		       struct stat *attr, Inode **out, const UserPerm& perms)
 {
-  std::lock_guard lock(client_lock);
-
-  if (unmounting)
+  destructive_lock_ref_t ulr(this, Client::STATE_UNMOUNTING);
+  if (!is_mounted())
     return -ENOTCONN;
+
+  std::lock_guard lock(client_lock);
 
   vinodeno_t vparent = _get_vino(parent);
 
@@ -12591,10 +12740,11 @@ int Client::ll_symlinkx(Inode *parent, const char *name, const char *value,
 			Inode **out, struct ceph_statx *stx, unsigned want,
 			unsigned flags, const UserPerm& perms)
 {
-  std::lock_guard lock(client_lock);
-
-  if (unmounting)
+  destructive_lock_ref_t ulr(this, Client::STATE_UNMOUNTING);
+  if (!is_mounted())
     return -ENOTCONN;
+
+  std::lock_guard lock(client_lock);
 
   vinodeno_t vparent = _get_vino(parent);
 
@@ -12676,10 +12826,11 @@ int Client::_unlink(Inode *dir, const char *name, const UserPerm& perm)
 
 int Client::ll_unlink(Inode *in, const char *name, const UserPerm& perm)
 {
-  std::lock_guard lock(client_lock);
-
-  if (unmounting)
+  destructive_lock_ref_t ulr(this, Client::STATE_UNMOUNTING);
+  if (!is_mounted())
     return -ENOTCONN;
+
+  std::lock_guard lock(client_lock);
 
   vinodeno_t vino = _get_vino(in);
 
@@ -12751,10 +12902,11 @@ int Client::_rmdir(Inode *dir, const char *name, const UserPerm& perms)
 
 int Client::ll_rmdir(Inode *in, const char *name, const UserPerm& perms)
 {
-  std::lock_guard lock(client_lock);
-
-  if (unmounting)
+  destructive_lock_ref_t ulr(this, Client::STATE_UNMOUNTING);
+  if (!is_mounted())
     return -ENOTCONN;
+
+  std::lock_guard lock(client_lock);
 
   vinodeno_t vino = _get_vino(in);
 
@@ -12931,10 +13083,11 @@ int Client::_rename(Inode *fromdir, const char *fromname, Inode *todir, const ch
 int Client::ll_rename(Inode *parent, const char *name, Inode *newparent,
 		      const char *newname, const UserPerm& perm)
 {
-  std::lock_guard lock(client_lock);
-
-  if (unmounting)
+  destructive_lock_ref_t ulr(this, Client::STATE_UNMOUNTING);
+  if (!is_mounted())
     return -ENOTCONN;
+
+  std::lock_guard lock(client_lock);
 
   vinodeno_t vparent = _get_vino(parent);
   vinodeno_t vnewparent = _get_vino(newparent);
@@ -13007,10 +13160,11 @@ int Client::_link(Inode *in, Inode *dir, const char *newname, const UserPerm& pe
 int Client::ll_link(Inode *in, Inode *newparent, const char *newname,
 		    const UserPerm& perm)
 {
-  std::lock_guard lock(client_lock);
-
-  if (unmounting)
+  destructive_lock_ref_t ulr(this, Client::STATE_UNMOUNTING);
+  if (!is_mounted())
     return -ENOTCONN;
+
+  std::lock_guard lock(client_lock);
 
   vinodeno_t vino = _get_vino(in);
   vinodeno_t vnewparent = _get_vino(newparent);
@@ -13142,10 +13296,11 @@ uint64_t Client::ll_get_internal_offset(Inode *in, uint64_t blockno)
 int Client::ll_opendir(Inode *in, int flags, dir_result_t** dirpp,
 		       const UserPerm& perms)
 {
-  std::lock_guard lock(client_lock);
-
-  if (unmounting)
+  destructive_lock_ref_t ulr(this, Client::STATE_UNMOUNTING);
+  if (!is_mounted())
     return -ENOTCONN;
+
+  std::lock_guard lock(client_lock);
 
   vinodeno_t vino = _get_vino(in);
 
@@ -13169,13 +13324,14 @@ int Client::ll_opendir(Inode *in, int flags, dir_result_t** dirpp,
 
 int Client::ll_releasedir(dir_result_t *dirp)
 {
+  destructive_lock_ref_t ulr(this, Client::STATE_UNMOUNTING);
+  if (!is_mounted())
+    return -ENOTCONN;
+
   std::lock_guard lock(client_lock);
   ldout(cct, 3) << "ll_releasedir " << dirp << dendl;
   tout(cct) << "ll_releasedir" << std::endl;
   tout(cct) << (unsigned long)dirp << std::endl;
-
-  if (unmounting)
-    return -ENOTCONN;
 
   _closedir(dirp);
   return 0;
@@ -13183,13 +13339,14 @@ int Client::ll_releasedir(dir_result_t *dirp)
 
 int Client::ll_fsyncdir(dir_result_t *dirp)
 {
+  destructive_lock_ref_t ulr(this, Client::STATE_UNMOUNTING);
+  if (!is_mounted())
+    return -ENOTCONN;
+
   std::lock_guard lock(client_lock);
   ldout(cct, 3) << "ll_fsyncdir " << dirp << dendl;
   tout(cct) << "ll_fsyncdir" << std::endl;
   tout(cct) << (unsigned long)dirp << std::endl;
-
-  if (unmounting)
-    return -ENOTCONN;
 
   return _fsync(dirp->inode.get(), false);
 }
@@ -13198,10 +13355,11 @@ int Client::ll_open(Inode *in, int flags, Fh **fhp, const UserPerm& perms)
 {
   ceph_assert(!(flags & O_CREAT));
 
-  std::lock_guard lock(client_lock);
-
-  if (unmounting)
+  destructive_lock_ref_t ulr(this, Client::STATE_UNMOUNTING);
+  if (!is_mounted())
     return -ENOTCONN;
+
+  std::lock_guard lock(client_lock);
 
   vinodeno_t vino = _get_vino(in);
 
@@ -13316,11 +13474,12 @@ int Client::ll_create(Inode *parent, const char *name, mode_t mode,
 		      int flags, struct stat *attr, Inode **outp, Fh **fhp,
 		      const UserPerm& perms)
 {
+  destructive_lock_ref_t ulr(this, Client::STATE_UNMOUNTING);
+  if (!is_mounted())
+    return -ENOTCONN;
+
   std::lock_guard lock(client_lock);
   InodeRef in;
-
-  if (unmounting)
-    return -ENOTCONN;
 
   int r = _ll_create(parent, name, mode, flags, &in, CEPH_STAT_CAP_INODE_ALL,
 		      fhp, perms);
@@ -13346,11 +13505,12 @@ int Client::ll_createx(Inode *parent, const char *name, mode_t mode,
 			const UserPerm& perms)
 {
   unsigned caps = statx_to_mask(lflags, want);
+  destructive_lock_ref_t ulr(this, Client::STATE_UNMOUNTING);
+  if (!is_mounted())
+    return -ENOTCONN;
+
   std::lock_guard lock(client_lock);
   InodeRef in;
-
-  if (unmounting)
-    return -ENOTCONN;
 
   int r = _ll_create(parent, name, mode, oflags, &in, caps, fhp, perms);
   if (r >= 0) {
@@ -13372,28 +13532,30 @@ int Client::ll_createx(Inode *parent, const char *name, mode_t mode,
 
 loff_t Client::ll_lseek(Fh *fh, loff_t offset, int whence)
 {
+  destructive_lock_ref_t ulr(this, Client::STATE_UNMOUNTING);
+  if (!is_mounted())
+    return -ENOTCONN;
+
   std::lock_guard lock(client_lock);
   tout(cct) << "ll_lseek" << std::endl;
   tout(cct) << offset << std::endl;
   tout(cct) << whence << std::endl;
-
-  if (unmounting)
-    return -ENOTCONN;
 
   return _lseek(fh, offset, whence);
 }
 
 int Client::ll_read(Fh *fh, loff_t off, loff_t len, bufferlist *bl)
 {
+  destructive_lock_ref_t ulr(this, Client::STATE_UNMOUNTING);
+  if (!is_mounted())
+    return -ENOTCONN;
+
   std::lock_guard lock(client_lock);
   ldout(cct, 3) << "ll_read " << fh << " " << fh->inode->ino << " " << " " << off << "~" << len << dendl;
   tout(cct) << "ll_read" << std::endl;
   tout(cct) << (unsigned long)fh << std::endl;
   tout(cct) << off << std::endl;
   tout(cct) << len << std::endl;
-
-  if (unmounting)
-    return -ENOTCONN;
 
   /* We can't return bytes written larger than INT_MAX, clamp len to that */
   len = std::min(len, (loff_t)INT_MAX);
@@ -13409,10 +13571,11 @@ int Client::ll_read_block(Inode *in, uint64_t blockid,
 			  uint64_t length,
 			  file_layout_t* layout)
 {
-  std::lock_guard lock(client_lock);
-
-  if (unmounting)
+  destructive_lock_ref_t ulr(this, Client::STATE_UNMOUNTING);
+  if (!is_mounted())
     return -ENOTCONN;
+
+  std::lock_guard lock(client_lock);
 
   vinodeno_t vino = _get_vino(in);
   object_t oid = file_object_t(vino.ino, blockid);
@@ -13451,7 +13614,11 @@ int Client::ll_write_block(Inode *in, uint64_t blockid,
   vinodeno_t vino = ll_get_vino(in);
   int r = 0;
   std::unique_ptr<C_SaferCond> onsafe = nullptr;
-  
+
+  destructive_lock_ref_t ulr(this, Client::STATE_UNMOUNTING);
+  if (!is_mounted())
+    return -ENOTCONN;
+
   if (length == 0) {
     return -EINVAL;
   }
@@ -13474,11 +13641,6 @@ int Client::ll_write_block(Inode *in, uint64_t blockid,
 
   /* lock just in time */
   client_lock.lock();
-  if (unmounting) {
-    client_lock.unlock();
-    return -ENOTCONN;
-  }
-
   objecter->write(oid,
 		  object_locator_t(layout->pool_id),
 		  offset,
@@ -13537,7 +13699,8 @@ int Client::ll_write(Fh *fh, loff_t off, loff_t len, const char *data)
   tout(cct) << off << std::endl;
   tout(cct) << len << std::endl;
 
-  if (unmounting)
+  destructive_lock_ref_t ulr(this, Client::STATE_UNMOUNTING);
+  if (!is_mounted())
     return -ENOTCONN;
 
   /* We can't return bytes written larger than INT_MAX, clamp len to that */
@@ -13550,42 +13713,48 @@ int Client::ll_write(Fh *fh, loff_t off, loff_t len, const char *data)
 
 int64_t Client::ll_writev(struct Fh *fh, const struct iovec *iov, int iovcnt, int64_t off)
 {
+  destructive_lock_ref_t ulr(this, Client::STATE_UNMOUNTING);
+  if (!is_mounted())
+    return -ENOTCONN;
+
   std::lock_guard lock(client_lock);
-  if (unmounting)
-   return -ENOTCONN;
   return _preadv_pwritev_locked(fh, iov, iovcnt, off, true, false);
 }
 
 int64_t Client::ll_readv(struct Fh *fh, const struct iovec *iov, int iovcnt, int64_t off)
 {
+  destructive_lock_ref_t ulr(this, Client::STATE_UNMOUNTING);
+  if (!is_mounted())
+    return -ENOTCONN;
+
   std::lock_guard lock(client_lock);
-  if (unmounting)
-   return -ENOTCONN;
   return _preadv_pwritev_locked(fh, iov, iovcnt, off, false, false);
 }
 
 int Client::ll_flush(Fh *fh)
 {
+  destructive_lock_ref_t ulr(this, Client::STATE_UNMOUNTING);
+  if (!is_mounted())
+    return -ENOTCONN;
+
   std::lock_guard lock(client_lock);
   ldout(cct, 3) << "ll_flush " << fh << " " << fh->inode->ino << " " << dendl;
   tout(cct) << "ll_flush" << std::endl;
   tout(cct) << (unsigned long)fh << std::endl;
-
-  if (unmounting)
-    return -ENOTCONN;
 
   return _flush(fh);
 }
 
 int Client::ll_fsync(Fh *fh, bool syncdataonly)
 {
+  destructive_lock_ref_t ulr(this, Client::STATE_UNMOUNTING);
+  if (!is_mounted())
+    return -ENOTCONN;
+
   std::lock_guard lock(client_lock);
   ldout(cct, 3) << "ll_fsync " << fh << " " << fh->inode->ino << " " << dendl;
   tout(cct) << "ll_fsync" << std::endl;
   tout(cct) << (unsigned long)fh << std::endl;
-
-  if (unmounting)
-    return -ENOTCONN;
 
   int r = _fsync(fh, syncdataonly);
   if (r) {
@@ -13597,13 +13766,14 @@ int Client::ll_fsync(Fh *fh, bool syncdataonly)
 
 int Client::ll_sync_inode(Inode *in, bool syncdataonly)
 {
+  destructive_lock_ref_t ulr(this, Client::STATE_UNMOUNTING);
+  if (!is_mounted())
+    return -ENOTCONN;
+
   std::lock_guard lock(client_lock);
   ldout(cct, 3) << "ll_sync_inode " << *in << " " << dendl;
   tout(cct) << "ll_sync_inode" << std::endl;
   tout(cct) << (unsigned long)in << std::endl;
-
-  if (unmounting)
-    return -ENOTCONN;
 
   return _fsync(in, syncdataonly);
 }
@@ -13742,24 +13912,26 @@ int Client::_fallocate(Fh *fh, int mode, int64_t offset, int64_t length)
 
 int Client::ll_fallocate(Fh *fh, int mode, int64_t offset, int64_t length)
 {
+  destructive_lock_ref_t ulr(this, Client::STATE_UNMOUNTING);
+  if (!is_mounted())
+    return -ENOTCONN;
+
   std::lock_guard lock(client_lock);
   ldout(cct, 3) << __func__ << " " << fh << " " << fh->inode->ino << " " << dendl;
   tout(cct) << __func__ << " " << mode << " " << offset << " " << length << std::endl;
   tout(cct) << (unsigned long)fh << std::endl;
-
-  if (unmounting)
-    return -ENOTCONN;
 
   return _fallocate(fh, mode, offset, length);
 }
 
 int Client::fallocate(int fd, int mode, loff_t offset, loff_t length)
 {
+  destructive_lock_ref_t ulr(this, Client::STATE_UNMOUNTING);
+  if (!is_mounted())
+    return -ENOTCONN;
+
   std::lock_guard lock(client_lock);
   tout(cct) << __func__ << " " << " " << fd << mode << " " << offset << " " << length << std::endl;
-
-  if (unmounting)
-    return -ENOTCONN;
 
   Fh *fh = get_filehandle(fd);
   if (!fh)
@@ -13773,10 +13945,11 @@ int Client::fallocate(int fd, int mode, loff_t offset, loff_t length)
 
 int Client::ll_release(Fh *fh)
 {
-  std::lock_guard lock(client_lock);
-
-  if (unmounting)
+  destructive_lock_ref_t ulr(this, Client::STATE_UNMOUNTING);
+  if (!is_mounted())
     return -ENOTCONN;
+
+  std::lock_guard lock(client_lock);
 
   ldout(cct, 3) << __func__ << " (fh)" << fh << " " << fh->inode->ino << " " <<
     dendl;
@@ -13790,39 +13963,42 @@ int Client::ll_release(Fh *fh)
 
 int Client::ll_getlk(Fh *fh, struct flock *fl, uint64_t owner)
 {
+  destructive_lock_ref_t ulr(this, Client::STATE_UNMOUNTING);
+  if (!is_mounted())
+    return -ENOTCONN;
+
   std::lock_guard lock(client_lock);
 
   ldout(cct, 3) << "ll_getlk (fh)" << fh << " " << fh->inode->ino << dendl;
   tout(cct) << "ll_getk (fh)" << (unsigned long)fh << std::endl;
-
-  if (unmounting)
-    return -ENOTCONN;
 
   return _getlk(fh, fl, owner);
 }
 
 int Client::ll_setlk(Fh *fh, struct flock *fl, uint64_t owner, int sleep)
 {
+  destructive_lock_ref_t ulr(this, Client::STATE_UNMOUNTING);
+  if (!is_mounted())
+    return -ENOTCONN;
+
   std::lock_guard lock(client_lock);
 
   ldout(cct, 3) << __func__ << "  (fh) " << fh << " " << fh->inode->ino << dendl;
   tout(cct) << __func__ << " (fh)" << (unsigned long)fh << std::endl;
-
-  if (unmounting)
-    return -ENOTCONN;
 
   return _setlk(fh, fl, owner, sleep);
 }
 
 int Client::ll_flock(Fh *fh, int cmd, uint64_t owner)
 {
+  destructive_lock_ref_t ulr(this, Client::STATE_UNMOUNTING);
+  if (!is_mounted())
+    return -ENOTCONN;
+
   std::lock_guard lock(client_lock);
 
   ldout(cct, 3) << __func__ << "  (fh) " << fh << " " << fh->inode->ino << dendl;
   tout(cct) << __func__ << " (fh)" << (unsigned long)fh << std::endl;
-
-  if (unmounting)
-    return -ENOTCONN;
 
   return _flock(fh, cmd, owner);
 }
@@ -13848,7 +14024,7 @@ int Client::ll_delegation(Fh *fh, unsigned cmd, ceph_deleg_cb_t cb, void *priv)
 
   std::lock_guard lock(client_lock);
 
-  if (!mounted)
+  if (!is_mounted())
     return -ENOTCONN;
 
   Inode *inode = fh->inode.get();
@@ -13901,10 +14077,11 @@ void Client::ll_interrupt(void *d)
 int Client::describe_layout(const char *relpath, file_layout_t *lp,
 			    const UserPerm& perms)
 {
-  std::lock_guard lock(client_lock);
-
-  if (unmounting)
+  destructive_lock_ref_t ulr(this, Client::STATE_UNMOUNTING);
+  if (!is_mounted())
     return -ENOTCONN;
+
+  std::lock_guard lock(client_lock);
 
   filepath path(relpath);
   InodeRef in;
@@ -13920,10 +14097,11 @@ int Client::describe_layout(const char *relpath, file_layout_t *lp,
 
 int Client::fdescribe_layout(int fd, file_layout_t *lp)
 {
-  std::lock_guard lock(client_lock);
-
-  if (unmounting)
+  destructive_lock_ref_t ulr(this, Client::STATE_UNMOUNTING);
+  if (!is_mounted())
     return -ENOTCONN;
+
+  std::lock_guard lock(client_lock);
 
   Fh *f = get_filehandle(fd);
   if (!f)
@@ -13938,10 +14116,11 @@ int Client::fdescribe_layout(int fd, file_layout_t *lp)
 
 int64_t Client::get_default_pool_id()
 {
-  std::lock_guard lock(client_lock);
-
-  if (unmounting)
+  destructive_lock_ref_t ulr(this, Client::STATE_UNMOUNTING);
+  if (!is_mounted())
     return -ENOTCONN;
+
+  std::lock_guard lock(client_lock);
 
   /* first data pool is the default */ 
   return mdsmap->get_first_data_pool(); 
@@ -13951,10 +14130,11 @@ int64_t Client::get_default_pool_id()
 
 int64_t Client::get_pool_id(const char *pool_name)
 {
-  std::lock_guard lock(client_lock);
-
-  if (unmounting)
+  destructive_lock_ref_t ulr(this, Client::STATE_UNMOUNTING);
+  if (!is_mounted())
     return -ENOTCONN;
+
+  std::lock_guard lock(client_lock);
 
   return objecter->with_osdmap(std::mem_fn(&OSDMap::lookup_pg_pool_name),
 			       pool_name);
@@ -13962,10 +14142,11 @@ int64_t Client::get_pool_id(const char *pool_name)
 
 string Client::get_pool_name(int64_t pool)
 {
-  std::lock_guard lock(client_lock);
-
-  if (unmounting)
+  destructive_lock_ref_t ulr(this, Client::STATE_UNMOUNTING);
+  if (!is_mounted())
     return string();
+
+  std::lock_guard lock(client_lock);
 
   return objecter->with_osdmap([pool](const OSDMap& o) {
       return o.have_pg_pool(pool) ? o.get_pool_name(pool) : string();
@@ -13974,10 +14155,11 @@ string Client::get_pool_name(int64_t pool)
 
 int Client::get_pool_replication(int64_t pool)
 {
-  std::lock_guard lock(client_lock);
-
-  if (unmounting)
+  destructive_lock_ref_t ulr(this, Client::STATE_UNMOUNTING);
+  if (!is_mounted())
     return -ENOTCONN;
+
+  std::lock_guard lock(client_lock);
 
   return objecter->with_osdmap([pool](const OSDMap& o) {
       return o.have_pg_pool(pool) ? o.get_pg_pool(pool)->get_size() : -ENOENT;
@@ -13986,10 +14168,11 @@ int Client::get_pool_replication(int64_t pool)
 
 int Client::get_file_extent_osds(int fd, loff_t off, loff_t *len, vector<int>& osds)
 {
-  std::lock_guard lock(client_lock);
-
-  if (unmounting)
+  destructive_lock_ref_t ulr(this, Client::STATE_UNMOUNTING);
+  if (!is_mounted())
     return -ENOTCONN;
+
+  std::lock_guard lock(client_lock);
 
   Fh *f = get_filehandle(fd);
   if (!f)
@@ -14032,10 +14215,11 @@ int Client::get_file_extent_osds(int fd, loff_t off, loff_t *len, vector<int>& o
 
 int Client::get_osd_crush_location(int id, vector<pair<string, string> >& path)
 {
-  std::lock_guard lock(client_lock);
-
-  if (unmounting)
+  destructive_lock_ref_t ulr(this, Client::STATE_UNMOUNTING);
+  if (!is_mounted())
     return -ENOTCONN;
+
+  std::lock_guard lock(client_lock);
 
   if (id < 0)
     return -EINVAL;
@@ -14047,10 +14231,11 @@ int Client::get_osd_crush_location(int id, vector<pair<string, string> >& path)
 int Client::get_file_stripe_address(int fd, loff_t offset,
 				    vector<entity_addr_t>& address)
 {
-  std::lock_guard lock(client_lock);
-
-  if (unmounting)
+  destructive_lock_ref_t ulr(this, Client::STATE_UNMOUNTING);
+  if (!is_mounted())
     return -ENOTCONN;
+
+  std::lock_guard lock(client_lock);
 
   Fh *f = get_filehandle(fd);
   if (!f)
@@ -14080,10 +14265,11 @@ int Client::get_file_stripe_address(int fd, loff_t offset,
 
 int Client::get_osd_addr(int osd, entity_addr_t& addr)
 {
-  std::lock_guard lock(client_lock);
-
-  if (unmounting)
+  destructive_lock_ref_t ulr(this, Client::STATE_UNMOUNTING);
+  if (!is_mounted())
     return -ENOTCONN;
+
+  std::lock_guard lock(client_lock);
 
   return objecter->with_osdmap([&](const OSDMap& o) {
       if (!o.exists(osd))
@@ -14097,10 +14283,11 @@ int Client::get_osd_addr(int osd, entity_addr_t& addr)
 int Client::enumerate_layout(int fd, vector<ObjectExtent>& result,
 			     loff_t length, loff_t offset)
 {
-  std::lock_guard lock(client_lock);
-
-  if (unmounting)
+  destructive_lock_ref_t ulr(this, Client::STATE_UNMOUNTING);
+  if (!is_mounted())
     return -ENOTCONN;
+
+  std::lock_guard lock(client_lock);
 
   Fh *f = get_filehandle(fd);
   if (!f)
@@ -14118,10 +14305,11 @@ int Client::enumerate_layout(int fd, vector<ObjectExtent>& result,
 /* find an osd with the same ip.  -ENXIO if none. */
 int Client::get_local_osd()
 {
-  std::lock_guard lock(client_lock);
-
-  if (unmounting)
+  destructive_lock_ref_t ulr(this, Client::STATE_UNMOUNTING);
+  if (!is_mounted())
     return -ENOTCONN;
+
+  std::lock_guard lock(client_lock);
 
   objecter->with_osdmap([this](const OSDMap& o) {
       if (o.get_epoch() != local_osd_epoch) {
@@ -14497,6 +14685,10 @@ out:
 
 void Client::set_filer_flags(int flags)
 {
+  destructive_lock_ref_t dlr(this, Client::STATE_NEW);
+  if (!is_initialized())
+    return;
+
   std::lock_guard l(client_lock);
   ceph_assert(flags == 0 ||
 	 flags == CEPH_OSD_FLAG_LOCALIZE_READS);
@@ -14513,8 +14705,12 @@ void Client::clear_filer_flags(int flags)
 // called before mount
 void Client::set_uuid(const std::string& uuid)
 {
+  destructive_lock_ref_t dlr(this, Client::STATE_NEW);
+  if (!is_initialized())
+    return;
+
   std::lock_guard l(client_lock);
-  assert(initialized);
+  assert(is_initialized());
   assert(!uuid.empty());
 
   metadata["uuid"] = uuid;
@@ -14524,8 +14720,12 @@ void Client::set_uuid(const std::string& uuid)
 // called before mount. 0 means infinite
 void Client::set_session_timeout(unsigned timeout)
 {
+  destructive_lock_ref_t dlr(this, Client::STATE_NEW);
+  if (!is_initialized())
+    return;
+
   std::lock_guard l(client_lock);
-  assert(initialized);
+  assert(is_initialized());
 
   metadata["timeout"] = stringify(timeout);
 }
@@ -14534,13 +14734,14 @@ void Client::set_session_timeout(unsigned timeout)
 int Client::start_reclaim(const std::string& uuid, unsigned flags,
 			  const std::string& fs_name)
 {
-  std::unique_lock l(client_lock);
-  if (!initialized)
+  destructive_lock_ref_t dlr(this, Client::STATE_NEW);
+  if (!is_initialized())
     return -ENOTCONN;
 
   if (uuid.empty())
     return -EINVAL;
 
+  std::unique_lock l(client_lock);
   {
     auto it = metadata.find("uuid");
     if (it != metadata.end() && it->second == uuid)
