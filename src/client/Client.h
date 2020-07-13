@@ -65,6 +65,7 @@ class WritebackHandler;
 
 class MDSMap;
 class Message;
+class destructive_lock_ref_t;
 
 enum {
   l_c_first = 20000,
@@ -235,6 +236,7 @@ public:
   friend class C_Client_CacheRelease; // Asserts on client_lock
   friend class SyntheticClient;
   friend void intrusive_ptr_release(Inode *in);
+  friend class destructive_lock_ref_t;
 
   using Dispatcher::cct;
 
@@ -746,9 +748,6 @@ protected:
   static const unsigned CHECK_CAPS_NODELAY = 0x1;
   static const unsigned CHECK_CAPS_SYNCHRONOUS = 0x2;
 
-
-  bool is_initialized() const { return initialized; }
-
   void check_caps(Inode *in, unsigned flags);
 
   void set_cap_epoch_barrier(epoch_t e);
@@ -969,6 +968,46 @@ protected:
 
   client_t whoami;
 
+  // global unmount lock
+  ceph::mutex destructive_lock = ceph::make_mutex("Client::unmount_lock");
+  ceph::condition_variable destructive_cond;
+  int unmounting_refcnt = 0;
+  int shutdown_refcnt = 0;
+
+  enum _state{
+    STATE_NULL,
+    STATE_NEW,
+    STATE_INITIALIZED,
+    STATE_MOUNTING,
+    STATE_MOUNTED,
+    STATE_UNMOUNTING,
+    STATE_UNMOUNTED = STATE_INITIALIZED,
+  } state;
+
+  bool is_new() {
+    std::lock_guard l{client->destructive_lock};
+    return state == STATE_NEW;
+  }
+  bool is_initialized() {
+    std::lock_guard l{client->destructive_lock};
+    return state >= STATE_INITIALIZED;
+  }
+  bool is_mounting() {
+    std::lock_guard l{client->destructive_lock};
+    return state == STATE_MOUNTING;
+  }
+  bool is_mounted() {
+    std::lock_guard l{client->destructive_lock};
+    return state == STATE_MOUNTED;
+  }
+  bool is_unmounting() {
+    std::lock_guard l{client->destructive_lock};
+    return state == STATE_UNMOUNTING;
+  }
+  bool is_unmounted() {
+    std::lock_guard l{client->destructive_lock};
+    return state <= STATE_INITIALIZED;
+  }
 
 private:
   struct C_Readahead : public Context {
@@ -1235,9 +1274,6 @@ private:
   ceph::unordered_set<dir_result_t*> opened_dirs;
   uint64_t fd_gen = 1;
 
-  bool   initialized = false;
-  bool   mounted = false;
-  bool   unmounting = false;
   bool   blacklisted = false;
 
   ceph::unordered_map<vinodeno_t, Inode*> inode_map;
@@ -1297,6 +1333,100 @@ public:
 
   int init() override;
   void shutdown() override;
+};
+
+class destructive_lock_ref_t {
+public:
+  destructive_lock_ref_t(const destructive_lock_ref_t &) = delete;
+  destructive_lock_ref_t(const destructive_lock_ref_t &&) = delete;
+  destructive_lock_ref_t(class Client *c, Client::_state state, bool update_state) {
+    {
+      std::lock_guard l{c->destructive_lock};
+      c->state = state;
+    }
+
+    satisfied = true; // always set it to true
+    type = Client::STATE_NULL;
+    client = c;
+  }
+
+  // Will add the refcnt if the client->state matches
+  destructive_lock_ref_t(class Client *c, Client::_state needed) {
+    {
+      std::lock_guard l{c->destructive_lock};
+
+      if ((needed == Client::STATE_INITIALIZED &&
+          c->state >= Client::STATE_INITIALIZED) ||
+          c->state == needed) {
+        satisfied = true;
+
+        if (needed == Client::STATE_UNMOUNTING ||
+            needed == Client::STATE_MOUNTING ||
+            needed == Client::STATE_MOUNTED)
+          c->unmounting_refcnt++;
+
+        if (needed == Client::STATE_NEW ||
+            needed == Client::STATE_INITIALIZED)
+          c->shutdown_refcnt++;
+      }
+    }
+
+    type = needed;
+    client = c;
+  }
+
+  bool is_satisfied() { return satisfied; }
+
+  void update_state(Client::_state state) {
+    std::lock_guard l{client->destructive_lock};
+    client->state = state;
+  }
+
+  /* returning false means client is already unmounted or unmounting */
+  bool unmounting_wait() {
+    std::unique_lock l{client->destructive_lock};
+    if (client->state == Client::STATE_INITIALIZED ||
+	client->state == Client::STATE_NEW)
+      return false;
+
+    client->destructive_cond.wait(l, [this] {
+      return !client->unmounting_refcnt;
+    });
+
+    return true;
+  }
+
+  /* returning false means client is already uninitialized */
+  bool shutdown_wait() {
+    std::unique_lock l{client->destructive_lock};
+    client->destructive_cond.wait(l, [this] {
+      return !client->shutdown_refcnt;
+    });
+
+    return true;
+  }
+
+  ~destructive_lock_ref_t() {
+    if (type == Client::STATE_NULL)
+      return;
+
+    std::lock_guard l{client->destructive_lock};
+    if ((type == Client::STATE_UNMOUNTING ||
+        type == Client::STATE_MOUNTING ||
+        type == Client::STATE_MOUNTED) &&
+        --client->unmounting_refcnt == 0)
+      client->destructive_cond.notify_all();
+
+    if ((type == Client::STATE_NEW ||
+        type == Client::STATE_INITIALIZED) &&
+        --client->shutdown_refcnt == 0)
+      client->destructive_cond.notify_all();
+  }
+
+private:
+  class Client *client;
+  Client::_state type;
+  bool satisfied = false;
 };
 
 #endif
