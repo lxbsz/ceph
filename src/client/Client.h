@@ -65,6 +65,7 @@ class WritebackHandler;
 
 class MDSMap;
 class Message;
+class destructive_lock_ref_t;
 
 enum {
   l_c_first = 20000,
@@ -235,6 +236,7 @@ public:
   friend class C_Client_CacheRelease; // Asserts on client_lock
   friend class SyntheticClient;
   friend void intrusive_ptr_release(Inode *in);
+  friend class destructive_lock_ref_t;
 
   using Dispatcher::cct;
 
@@ -750,9 +752,6 @@ protected:
   static const unsigned CHECK_CAPS_NODELAY = 0x1;
   static const unsigned CHECK_CAPS_SYNCHRONOUS = 0x2;
 
-
-  bool is_initialized() const { return initialized; }
-
   void check_caps(Inode *in, unsigned flags);
 
   void set_cap_epoch_barrier(epoch_t e);
@@ -973,6 +972,35 @@ protected:
 
   client_t whoami;
 
+  // global unmount lock
+  ceph::mutex destructive_lock = ceph::make_mutex("Client::unmount_lock");
+  ceph::condition_variable destructive_cond;
+  int unmounting_refcnt = 0;
+  int shutdown_refcnt = 0;
+
+  enum _state{
+    STATE_NULL,
+    STATE_NEW,
+    STATE_INITIALIZED,
+    STATE_MOUNTING,
+    STATE_MOUNTED,
+    STATE_UNMOUNTING,
+    STATE_UNMOUNTED = STATE_INITIALIZED,
+  } state;
+
+  bool is_mounting() {
+    std::lock_guard l{destructive_lock};
+    return state == STATE_MOUNTING;
+  }
+
+  bool is_unmounting() {
+    std::lock_guard l{destructive_lock};
+    return state == STATE_UNMOUNTING;
+  }
+  bool is_mounted() {
+    std::lock_guard l{destructive_lock};
+    return state == STATE_MOUNTED;
+  }
 
 private:
   struct C_Readahead : public Context {
@@ -1239,9 +1267,6 @@ private:
   ceph::unordered_set<dir_result_t*> opened_dirs;
   uint64_t fd_gen = 1;
 
-  bool   initialized = false;
-  bool   mounted = false;
-  bool   unmounting = false;
   bool   blacklisted = false;
 
   ceph::unordered_map<vinodeno_t, Inode*> inode_map;
@@ -1301,6 +1326,135 @@ public:
 
   int init() override;
   void shutdown() override;
+};
+
+class destructive_lock_ref_t {
+public:
+  destructive_lock_ref_t(const destructive_lock_ref_t &) = delete;
+  destructive_lock_ref_t(const destructive_lock_ref_t &&) = delete;
+  destructive_lock_ref_t(class Client *c, Client::_state require, bool update_state=false) {
+    if (update_state) {
+      /*
+       * If update_state is true, it will update the state only.
+       * This case is mainly used in _unmount() and shutdown()
+       * when doing unmouting or uninitializeing, etc.
+       */
+      std::lock_guard l{c->destructive_lock};
+      c->state = require;
+
+      satisfied = true; // always set it to true
+
+      /*
+       * This will make sure in destructor it won't
+       * decrease the reference counter.
+       */
+      type = TYPE_NULL;
+    } else {
+      /*
+       * This case is used to increase the reference count.
+       * The 'state' here means the caller will try to check
+       * whether the client is in the this 'state' or not,
+       * if not the caller should abort executing.
+       */
+      std::lock_guard l{c->destructive_lock};
+
+      if ((require == Client::STATE_INITIALIZED && c->state >= Client::STATE_INITIALIZED) ||
+          (require == Client::STATE_MOUNTING && c->state >= Client::STATE_MOUNTING &&
+	   c->state <= Client::STATE_MOUNTED) ||
+	  c->state == require) {
+
+        /* The 'state' required matches the client state */
+        satisfied = true;
+
+	/*
+	 * The "reader" callers will increase the refcnt to
+	 * make sure that before executing the _unmount() the
+	 * client must wait they finish excuting.
+	 */
+        if (require == Client::STATE_UNMOUNTING ||
+            require == Client::STATE_MOUNTING ||
+            require == Client::STATE_MOUNTED) {
+          c->unmounting_refcnt++;
+          type = TYPE_UNMOUNT;
+        }
+
+	/*
+	 * The "reader" callers will increase the refcnt to
+	 * make sure that before executing the shutdown() the
+	 * cient must wait they finish excuting.
+	 */
+        if (require == Client::STATE_NEW ||
+            require == Client::STATE_INITIALIZED) {
+          c->shutdown_refcnt++;
+          type = TYPE_SHUTDOWN;
+        }
+      }
+    }
+
+    client = c;
+  }
+
+  bool is_satisfied() { return satisfied; }
+
+  void update_state(Client::_state state) {
+    std::lock_guard l{client->destructive_lock};
+    client->state = state;
+  }
+
+  /*
+   * Wait the unmounting_refcnt becomes 0(or all the readers
+   * released the refcnt) before continue the unmount.
+   *
+   * Returning false means the client is already unmounted or
+   * unmounting.
+   */
+  bool unmounting_wait() {
+    std::unique_lock l{client->destructive_lock};
+    if (client->state == Client::STATE_INITIALIZED ||
+	client->state == Client::STATE_NEW)
+      return false;
+
+    client->destructive_cond.wait(l, [this] {
+      return !client->unmounting_refcnt;
+    });
+
+    return true;
+  }
+
+  /*
+   * Wait the shutdown_refcnt becomes 0(or all the readers
+   * released the refcnt) before continue the uninitializion.
+   */
+  bool shutdown_wait() {
+    std::unique_lock l{client->destructive_lock};
+    client->destructive_cond.wait(l, [this] {
+      return !client->shutdown_refcnt;
+    });
+
+    return true;
+  }
+
+  ~destructive_lock_ref_t() {
+    if (type == TYPE_NULL)
+      return;
+
+    /* Decrease the refcnt and notify the waiters */
+    std::lock_guard l{client->destructive_lock};
+    if (type == TYPE_UNMOUNT && --client->unmounting_refcnt == 0)
+      client->destructive_cond.notify_all();
+
+    if (type == TYPE_SHUTDOWN && --client->shutdown_refcnt == 0)
+      client->destructive_cond.notify_all();
+  }
+
+private:
+  class Client *client;
+  bool satisfied = false;
+  enum {
+    TYPE_NULL,
+    TYPE_UNMOUNT,
+    TYPE_SHUTDOWN,
+  } type;
 };
 
 #endif
