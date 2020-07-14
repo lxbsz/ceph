@@ -2617,13 +2617,13 @@ void Client::handle_osd_map(const MConstRef<MOSDMap>& m)
 
 bool Client::ms_dispatch2(const MessageRef &m)
 {
+  unmounting_lock_ref_t uml(this);
+
   std::lock_guard l(client_lock);
   if (!initialized) {
     ldout(cct, 10) << "inactive, discarding " << *m << dendl;
     return true;
   }
-
-  unmounting_lock_ref_t uml(this);
 
   switch (m->get_type()) {
     // mounting and mds sessions
@@ -6023,7 +6023,7 @@ int Client::subscribe_mdsmap(const std::string &fs_name)
 int Client::mount(const std::string &mount_root, const UserPerm& perms,
 		  bool require_mds, const std::string &fs_name)
 {
-  std::lock_guard lock(client_lock);
+  unmounting_lock_ref_t uml(this);
 
   if (mounted) {
     ldout(cct, 5) << "already mounted" << dendl;
@@ -6032,6 +6032,7 @@ int Client::mount(const std::string &mount_root, const UserPerm& perms,
 
   unmounting = false;
 
+  std::lock_guard lock(client_lock);
   int r = subscribe_mdsmap(fs_name);
   if (r < 0) {
     lderr(cct) << "mdsmap subscription failed: " << cpp_strerror(r) << dendl;
@@ -6383,6 +6384,8 @@ void Client::flush_cap_releases()
 void Client::tick()
 {
   unmounting_lock_ref_t uml(this);
+  if (unmounting)
+    return;
 
   if (cct->_conf->client_debug_inject_tick_delay > 0) {
     sleep(cct->_conf->client_debug_inject_tick_delay);
@@ -10768,9 +10771,10 @@ int Client::_sync_fs()
 
 int Client::sync_fs()
 {
+  unmounting_lock_ref_t uml(this);
+
   std::lock_guard l(client_lock);
 
-  unmounting_lock_ref_t uml(this);
   if (unmounting)
     return -ENOTCONN;
 
@@ -14052,10 +14056,10 @@ int Client::ll_delegation(Fh *fh, unsigned cmd, ceph_deleg_cb_t cb, void *priv)
 {
   int ret = -EINVAL;
 
-  std::lock_guard lock(client_lock);
-
   if (!mounted)
     return -ENOTCONN;
+
+  std::lock_guard lock(client_lock);
 
   Inode *inode = fh->inode.get();
 
