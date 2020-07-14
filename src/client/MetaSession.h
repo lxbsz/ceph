@@ -16,7 +16,7 @@ struct Inode;
 struct CapSnap;
 struct MetaRequest;
 
-struct MetaSession {
+struct MetaSession : public RefCountedObject {
   mds_rank_t mds_num;
   ConnectionRef con;
   version_t seq;
@@ -55,6 +55,8 @@ struct MetaSession {
   std::set<ceph_tid_t> flushing_caps_tids;
 
   ceph::ref_t<MClientCapRelease> release;
+
+  ceph::mutex session_lock = ceph::make_mutex("MetaSession::session_lock");
 
   MetaSession(mds_rank_t mds_num, ConnectionRef con,
 	      const entity_addrvec_t& addrs)

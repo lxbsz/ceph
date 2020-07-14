@@ -764,11 +764,14 @@ protected:
   bool have_open_session(mds_rank_t mds);
   void got_mds_push(MetaSession *s);
   MetaSession *_get_mds_session(mds_rank_t mds, Connection *con);  ///< return session for mds *and* con; null otherwise
+  MetaSession *_get_session(MetaSession *s) {if (s) s->get(); return s;}
+  void _put_session(MetaSession *s) {if (s) s->put();}
+  void _release_session(MetaSession *s) {if (s) s->put();}
   MetaSession *_get_or_open_mds_session(mds_rank_t mds);
   MetaSession *_open_mds_session(mds_rank_t mds);
   void _close_mds_session(MetaSession *s);
   void _closed_mds_session(MetaSession *s, int err=0, bool rejected=false);
-  bool _any_stale_sessions() const;
+  bool _any_stale_sessions();
   void _kick_stale_sessions();
   void handle_client_session(const MConstRef<MClientSession>& m);
   void send_reconnect(MetaSession *s);
@@ -1212,7 +1215,7 @@ private:
   epoch_t cap_epoch_barrier = 0;
 
   // mds sessions
-  map<mds_rank_t, MetaSession> mds_sessions;  // mds -> push seq
+  map<mds_rank_t, MetaSession*> mds_sessions;  // mds -> push seq
   std::set<mds_rank_t> mds_ranks_closing;  // mds ranks currently tearing down sessions
   std::list<ceph::condition_variable*> waiting_for_mdsmap;
 
