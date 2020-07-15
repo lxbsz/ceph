@@ -1539,6 +1539,24 @@ void Client::connect_mds_targets(mds_rank_t mds)
   }
 }
 
+void Client::connect_mds_targets(mds_rank_t mds, std::unique_ptr<MDSMap>& newmap)
+{
+  ldout(cct, 10) << __func__ << " for mds." << mds << dendl;
+  ceph_assert(mds_sessions.count(mds));
+
+  const MDSMap::mds_info_t& info = newmap->get_mds_info(mds);
+  for (set<mds_rank_t>::const_iterator q = info.export_targets.begin();
+       q != info.export_targets.end();
+       ++q) {
+    if (mds_sessions.count(*q) == 0 &&
+	newmap->is_clientreplay_or_active_or_stopping(*q)) {
+      ldout(cct, 10) << "check_mds_sessions opening mds." << mds
+		     << " export target mds." << *q << dendl;
+      _open_mds_session(*q);
+    }
+  }
+}
+
 void Client::dump_mds_sessions(Formatter *f)
 {
   f->dump_int("id", get_nodeid().v);
@@ -2688,10 +2706,9 @@ void Client::handle_mds_map(const MConstRef<MMDSMap>& m)
 
   ldout(cct, 1) << __func__ << " epoch " << m->get_epoch() << dendl;
 
-  std::unique_ptr<MDSMap> oldmap(new MDSMap);
-  oldmap.swap(mdsmap);
+  std::unique_ptr<MDSMap> newmap(new MDSMap);
 
-  mdsmap->decode(m->get_encoded());
+  newmap->decode(m->get_encoded());
 
   // Cancel any commands for missing or laggy GIDs
   std::list<ceph_tid_t> cancel_ops;
@@ -2699,7 +2716,7 @@ void Client::handle_mds_map(const MConstRef<MMDSMap>& m)
   for (const auto &i : commands) {
     auto &op = i.second;
     const mds_gid_t op_mds_gid = op.mds_gid;
-    if (mdsmap->is_dne_gid(op_mds_gid) || mdsmap->is_laggy_gid(op_mds_gid)) {
+    if (newmap->is_dne_gid(op_mds_gid) || newmap->is_laggy_gid(op_mds_gid)) {
       ldout(cct, 1) << __func__ << ": cancelling command op " << i.first << dendl;
       cancel_ops.push_back(i.first);
       if (op.outs) {
@@ -2725,27 +2742,27 @@ void Client::handle_mds_map(const MConstRef<MMDSMap>& m)
     MetaSession *session = &p->second;
     ++p;
 
-    int oldstate = oldmap->get_state(mds);
-    int newstate = mdsmap->get_state(mds);
-    if (!mdsmap->is_up(mds)) {
+    int oldstate = mdsmap->get_state(mds);
+    int newstate = newmap->get_state(mds);
+    if (!newmap->is_up(mds)) {
       session->con->mark_down();
-    } else if (mdsmap->get_addrs(mds) != session->addrs) {
-      old_inc = oldmap->get_incarnation(mds);
-      new_inc = mdsmap->get_incarnation(mds);
+    } else if (newmap->get_addrs(mds) != session->addrs) {
+      old_inc = mdsmap->get_incarnation(mds);
+      new_inc = newmap->get_incarnation(mds);
       if (old_inc != new_inc) {
         ldout(cct, 1) << "mds incarnation changed from "
 		      << old_inc << " to " << new_inc << dendl;
         oldstate = MDSMap::STATE_NULL;
       }
       session->con->mark_down();
-      session->addrs = mdsmap->get_addrs(mds);
+      session->addrs = newmap->get_addrs(mds);
       // When new MDS starts to take over, notify kernel to trim unused entries
       // in its dcache/icache. Hopefully, the kernel will release some unused
       // inodes before the new MDS enters reconnect state.
       trim_cache_for_reconnect(session);
     } else if (oldstate == newstate)
       continue;  // no change
-    
+
     session->mds_state = newstate;
     if (newstate == MDSMap::STATE_RECONNECT) {
       session->con = messenger->connect_to_mds(session->addrs);
@@ -2764,10 +2781,10 @@ void Client::handle_mds_map(const MConstRef<MMDSMap>& m)
 	  signal_context_list(session->waiting_for_open);
 	  wake_up_session_caps(session, true);
 	}
-	connect_mds_targets(mds);
+	connect_mds_targets(mds, newmap);
       }
     } else if (newstate == MDSMap::STATE_NULL &&
-	       mds >= mdsmap->get_max_mds()) {
+	       mds >= newmap->get_max_mds()) {
       _closed_mds_session(session);
     }
   }
@@ -2775,7 +2792,8 @@ void Client::handle_mds_map(const MConstRef<MMDSMap>& m)
   // kick any waiting threads
   signal_cond_list(waiting_for_mdsmap);
 
-  monclient->sub_got("mdsmap", mdsmap->get_epoch());
+  monclient->sub_got("mdsmap", newmap->get_epoch());
+  newmap.swap(mdsmap);
 }
 
 void Client::send_reconnect(MetaSession *session)
