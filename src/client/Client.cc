@@ -2719,11 +2719,14 @@ void Client::handle_fs_map_user(const MConstRef<MFSMapUser>& m)
 
 void Client::handle_mds_map(const MConstRef<MMDSMap>& m)
 {
+  client_lock.unlock();
+
   mds_gid_t old_inc, new_inc;
   if (m->get_epoch() <= mdsmap->get_epoch()) {
     ldout(cct, 1) << __func__ << " epoch " << m->get_epoch()
                   << " is identical to or older than our "
                   << mdsmap->get_epoch() << dendl;
+    client_lock.lock();
     return;
   }
 
@@ -2762,6 +2765,7 @@ void Client::handle_mds_map(const MConstRef<MMDSMap>& m)
     }
   }
 
+  client_lock.lock();
   // reset session
   for (auto p = mds_sessions.begin(); p != mds_sessions.end(); ) {
     mds_rank_t mds = p->first;
@@ -2769,53 +2773,58 @@ void Client::handle_mds_map(const MConstRef<MMDSMap>& m)
     ++p;
 
     int oldstate = mdsmap->get_state(mds);
-    int newstate = newmap->get_state(mds);
-    if (!newmap->is_up(mds)) {
-      session->con->mark_down();
-    } else if (newmap->get_addrs(mds) != session->addrs) {
-      old_inc = mdsmap->get_incarnation(mds);
-      new_inc = newmap->get_incarnation(mds);
-      if (old_inc != new_inc) {
-        ldout(cct, 1) << "mds incarnation changed from "
-		      << old_inc << " to " << new_inc << dendl;
-        oldstate = MDSMap::STATE_NULL;
-      }
-      session->con->mark_down();
-      session->addrs = newmap->get_addrs(mds);
-      // When new MDS starts to take over, notify kernel to trim unused entries
-      // in its dcache/icache. Hopefully, the kernel will release some unused
-      // inodes before the new MDS enters reconnect state.
-      trim_cache_for_reconnect(session);
-    } else if (oldstate == newstate) {
-      _put_session(session);
-      continue;  // no change
-    }
+    old_inc = mdsmap->get_incarnation(mds);
+    client_lock.unlock();
 
-    session->mds_state = newstate;
-    if (newstate == MDSMap::STATE_RECONNECT) {
-      session->con = messenger->connect_to_mds(session->addrs);
-      send_reconnect(session);
-    } else if (newstate > MDSMap::STATE_RECONNECT) {
-      if (oldstate < MDSMap::STATE_RECONNECT) {
-	ldout(cct, 1) << "we may miss the MDSMap::RECONNECT, close mds session ... " << dendl;
-	_closed_mds_session(session);
-        _put_session(session);
-	continue;
+    int newstate = newmap->get_state(mds);
+    new_inc = newmap->get_incarnation(mds);
+    {
+      std::lock_guard sl{session->session_lock};
+      if (!newmap->is_up(mds)) {
+        session->con->mark_down();
+      } else if (newmap->get_addrs(mds) != session->addrs) {
+        if (old_inc != new_inc) {
+          ldout(cct, 1) << "mds incarnation changed from "
+                        << old_inc << " to " << new_inc << dendl;
+          oldstate = MDSMap::STATE_NULL;
+        }
+        session->con->mark_down();
+        session->addrs = newmap->get_addrs(mds);
+        // When new MDS starts to take over, notify kernel to trim unused entries
+        // in its dcache/icache. Hopefully, the kernel will release some unused
+        // inodes before the new MDS enters reconnect state.
+        trim_cache_for_reconnect(session);
+      } else if (oldstate == newstate) {
+        goto next;  // no change
       }
-      if (newstate >= MDSMap::STATE_ACTIVE) {
-	if (oldstate < MDSMap::STATE_ACTIVE) {
-	  // kick new requests
-	  kick_requests(session);
-	  kick_flushing_caps(session);
-	  signal_context_list(session->waiting_for_open);
-	  wake_up_session_caps(session, true);
-	}
-	connect_mds_targets(mds);
+
+      session->mds_state = newstate;
+      if (newstate == MDSMap::STATE_RECONNECT) {
+        session->con = messenger->connect_to_mds(session->addrs);
+        send_reconnect(session);
+      } else if (newstate > MDSMap::STATE_RECONNECT) {
+        if (oldstate < MDSMap::STATE_RECONNECT) {
+          ldout(cct, 1) << "we may miss the MDSMap::RECONNECT, close mds session ... " << dendl;
+          _closed_mds_session(session);
+          goto next;
+        }
+        if (newstate >= MDSMap::STATE_ACTIVE) {
+          if (oldstate < MDSMap::STATE_ACTIVE) {
+            // kick new requests
+            kick_requests(session);
+            kick_flushing_caps(session);
+            signal_context_list(session->waiting_for_open);
+            wake_up_session_caps(session, true);
+          }
+          connect_mds_targets(mds);
+        }
+      } else if (newstate == MDSMap::STATE_NULL &&
+                 mds >= newmap->get_max_mds()) {
+        _closed_mds_session(session);
       }
-    } else if (newstate == MDSMap::STATE_NULL &&
-	       mds >= newmap->get_max_mds()) {
-      _closed_mds_session(session);
     }
+next:
+    client_lock.lock();
     _put_session(session);
   }
 
