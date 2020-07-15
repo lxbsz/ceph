@@ -796,6 +796,7 @@ protected:
 			     mds_rank_t mds, int drop, int unless);
   mds_rank_t choose_target_mds(MetaRequest *req, Inode** phash_diri=NULL);
   void connect_mds_targets(mds_rank_t mds);
+  void connect_mds_targets(mds_rank_t mds, std::unique_ptr<MDSMap> newmap);
   void send_request(MetaRequest *request, MetaSession *session,
 		    bool drop_cap_releases=false);
   MRef<MClientRequest> build_client_request(MetaRequest *request);
