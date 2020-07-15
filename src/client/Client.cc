@@ -1700,8 +1700,10 @@ int Client::make_request(MetaRequest *request,
 {
   int r = 0;
 
+  std::unique_lock cl{client_lock, std::adopt_lock};
   // assign a unique tid
   ceph_tid_t tid = ++last_tid;
+
   request->set_tid(tid);
 
   // and timestamp
@@ -1762,26 +1764,34 @@ int Client::make_request(MetaRequest *request,
     // open a session?
     if (!have_open_session(mds)) {
       session = _get_or_open_mds_session(mds);
+      cl.unlock();
+      std::lock_guard l{session->session_lock};
       if (session->state == MetaSession::STATE_REJECTED) {
         _put_session(session);
 	request->abort(-EPERM);
+        cl.lock();
 	break;
       }
       // wait
       if (session->state == MetaSession::STATE_OPENING) {
 	ldout(cct, 10) << "waiting for session to mds." << mds << " to open" << dendl;
-	wait_on_context_list(session->waiting_for_open);
+	wait_on_context_list(session);
         _put_session(session);
+        cl.lock();
 	continue;
       }
 
       if (!have_open_session(mds)) {
         _put_session(session);
+        cl.lock();
 	continue;
       }
+      cl.lock();
     } else {
       session = _get_session(mds_sessions.at(mds));
     }
+    cl.unlock();
+    std::lock_guard l{session->session_lock};
 
     // send request.
     send_request(request, session);
@@ -1802,6 +1812,8 @@ int Client::make_request(MetaRequest *request,
     if (request->reply) 
       break;
   }
+
+  std::lock_guard l{session->session_lock};
 
   if (!request->reply) {
     ceph_assert(request->aborted());
@@ -2103,7 +2115,7 @@ void Client::_close_mds_session(MetaSession *s)
 void Client::_closed_mds_session(MetaSession *s, int err, bool rejected)
 {
   ceph_assert(!ceph_mutex_is_locked_by_me(client_lock));
-  ceph_assert(ceph_mutex_is_locked_by_me(session->session_lock));
+  ceph_assert(ceph_mutex_is_locked_by_me(s->session_lock));
 
   ldout(cct, 5) << __func__ << " mds." << s->mds_num << " seq " << s->seq << dendl;
   if (rejected && s->state != MetaSession::STATE_CLOSING)
@@ -2151,16 +2163,15 @@ void Client::handle_client_session(const MConstRef<MClientSession>& m)
 	lderr(cct) << "mds." << from << " lacks required features '"
 		   << missing_features << "', closing session " << dendl;
 	_close_mds_session(session);
-        client_lock.lock();
 	_closed_mds_session(session, -EPERM, true);
-        client_lock.unlock();
 	break;
       }
       session->mds_features = std::move(m->supported_features);
       session->state = MetaSession::STATE_OPEN;
 
-      client_lock.lock();
       renew_caps(session);
+
+      client_lock.lock();
       if (unmounting)
 	mount_cond.notify_all();
       else
@@ -2171,16 +2182,16 @@ void Client::handle_client_session(const MConstRef<MClientSession>& m)
     }
 
   case CEPH_SESSION_CLOSE:
-    client_lock.lock();
     _closed_mds_session(session);
-    client_lock.unlock();
     break;
 
   case CEPH_SESSION_RENEWCAPS:
     if (session->cap_renew_seq == m->get_seq()) {
       bool was_stale = ceph_clock_now() >= session->cap_ttl;
+      client_lock.lock();
       session->cap_ttl =
 	session->last_cap_renew_request + mdsmap->get_session_timeout();
+      client_lock.unlock();
       if (was_stale)
 	wake_up_session_caps(session, false);
     }
@@ -2824,7 +2835,9 @@ void Client::handle_mds_map(const MConstRef<MMDSMap>& m)
         // When new MDS starts to take over, notify kernel to trim unused entries
         // in its dcache/icache. Hopefully, the kernel will release some unused
         // inodes before the new MDS enters reconnect state.
+        client_lock.lock();
         trim_cache_for_reconnect(session);
+        client_lock.unlock();
       } else if (oldstate == newstate) {
         goto next;  // no change
       }
@@ -2841,13 +2854,14 @@ void Client::handle_mds_map(const MConstRef<MMDSMap>& m)
         }
         if (newstate >= MDSMap::STATE_ACTIVE) {
           if (oldstate < MDSMap::STATE_ACTIVE) {
-            // kick new requests
+            kick_requests(session); // kick new requests
+
             client_lock.lock();
-            kick_requests(session);
             kick_flushing_caps(session);
             signal_context_list(session->waiting_for_open);
-            wake_up_session_caps(session, true);
             client_lock.unlock();
+
+            wake_up_session_caps(session, true);
           }
           client_lock.lock();
           connect_mds_targets(mds);
@@ -3008,7 +3022,6 @@ void Client::resend_unsafe_requests(MetaSession *session)
 
   // also re-send old requests when MDS enters reconnect stage. So that MDS can
   // process completed requests in clientreplay stage.
-  client_lock.lock();
   for (map<ceph_tid_t, MetaRequest*>::iterator p = mds_requests.begin();
        p != mds_requests.end();
        ++p) {
@@ -3022,7 +3035,6 @@ void Client::resend_unsafe_requests(MetaSession *session)
     if (req->mds == session->mds_num)
       send_request(req, session, true);
   }
-  client_lock.unlock();
 }
 
 void Client::wait_unsafe_requests()
@@ -3949,13 +3961,16 @@ void Client::signal_cond_list(list<ceph::condition_variable*>& ls)
   }
 }
 
-void Client::wait_on_context_list(list<Context*>& ls)
+void Client::wait_on_context_list(MetaSession *session)
 {
+  ceph_assert(ceph_mutex_is_locked(session->session_lock));
+
+  list<Context*>& ls = session->waiting_for_open;
   ceph::condition_variable cond;
   bool done = false;
   int r;
   ls.push_back(new C_Cond(cond, &done, &r));
-  std::unique_lock l{client_lock, std::adopt_lock};
+  std::unique_lock l{session->session_lock, std::adopt_lock};
   cond.wait(l, [&done] { return done;});
   l.release();
 }
@@ -3970,6 +3985,8 @@ void Client::signal_context_list(list<Context*>& ls)
 
 void Client::wake_up_session_caps(MetaSession *s, bool reconnect)
 {
+  ceph_assert(!ceph_mutex_is_not_locked_by_me(client_lock));
+
   for (const auto &cap : s->caps) {
     auto &in = cap->inode;
     if (reconnect) {
@@ -3984,7 +4001,9 @@ void Client::wake_up_session_caps(MetaSession *s, bool reconnect)
 	  in.flags |= I_CAP_DROPPED;
       }
     }
+    client_lock.lock();
     signal_cond_list(in.waitfor_caps);
+    client_lock.unlock();
   }
 }
 
