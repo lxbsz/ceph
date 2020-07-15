@@ -1239,6 +1239,7 @@ private:
   std::unique_ptr<FSMapUser> fsmap_user;
 
   // MDS command state
+  ceph::mutex command_lock = ceph::make_mutex("Client::command_lock");
   CommandTable<MDSCommandOp> command_table;
 
   bool _use_faked_inos;

@@ -2727,30 +2727,33 @@ void Client::handle_mds_map(const MConstRef<MMDSMap>& m)
 
   newmap->decode(m->get_encoded());
 
-  // Cancel any commands for missing or laggy GIDs
-  std::list<ceph_tid_t> cancel_ops;
-  auto &commands = command_table.get_commands();
-  for (const auto &i : commands) {
-    auto &op = i.second;
-    const mds_gid_t op_mds_gid = op.mds_gid;
-    if (newmap->is_dne_gid(op_mds_gid) || newmap->is_laggy_gid(op_mds_gid)) {
-      ldout(cct, 1) << __func__ << ": cancelling command op " << i.first << dendl;
-      cancel_ops.push_back(i.first);
-      if (op.outs) {
-        std::ostringstream ss;
-        ss << "MDS " << op_mds_gid << " went away";
-        *(op.outs) = ss.str();
-      }
-      op.con->mark_down();
-      if (op.on_finish) {
-        op.on_finish->complete(-ETIMEDOUT);
+  {
+    // Cancel any commands for missing or laggy GIDs
+    std::list<ceph_tid_t> cancel_ops;
+    std::lock_guard cmd_lock(command_lock);
+    auto &commands = command_table.get_commands();
+    for (const auto &i : commands) {
+      auto &op = i.second;
+      const mds_gid_t op_mds_gid = op.mds_gid;
+      if (newmap->is_dne_gid(op_mds_gid) || newmap->is_laggy_gid(op_mds_gid)) {
+        ldout(cct, 1) << __func__ << ": cancelling command op " << i.first << dendl;
+        cancel_ops.push_back(i.first);
+        if (op.outs) {
+          std::ostringstream ss;
+          ss << "MDS " << op_mds_gid << " went away";
+          *(op.outs) = ss.str();
+        }
+        op.con->mark_down();
+        if (op.on_finish) {
+          op.on_finish->complete(-ETIMEDOUT);
+        }
       }
     }
-  }
 
-  for (std::list<ceph_tid_t>::iterator i = cancel_ops.begin();
-       i != cancel_ops.end(); ++i) {
-    command_table.erase(*i);
+    for (std::list<ceph_tid_t>::iterator i = cancel_ops.begin();
+         i != cancel_ops.end(); ++i) {
+      command_table.erase(*i);
+    }
   }
 
   // reset session
@@ -5906,6 +5909,7 @@ int Client::mds_command(
     // Open a connection to the target MDS
     ConnectionRef conn = messenger->connect_to_mds(info.get_addrs());
 
+    std::lock_guard cmd_lock(command_lock);
     // Generate MDSCommandOp state
     auto &op = command_table.start_command();
 
@@ -5935,6 +5939,7 @@ void Client::handle_command_reply(const MConstRef<MCommandReply>& m)
 
   ldout(cct, 10) << __func__ << ": tid=" << m->get_tid() << dendl;
 
+  std::lock_guard cmd_lock(command_lock);
   if (!command_table.exists(tid)) {
     ldout(cct, 1) << __func__ << ": unknown tid " << tid << ", dropping" << dendl;
     return;
