@@ -852,8 +852,8 @@ protected:
   // helpers
   void wake_up_session_caps(MetaSession *s, bool reconnect);
 
-  void wait_on_context_list(list<Context*>& ls);
-  void signal_context_list(list<Context*>& ls);
+  void wait_on_context_list(MetaSession *session);
+  void signal_context_list(MetaSession *session);
 
   // -- metadata cache stuff
 

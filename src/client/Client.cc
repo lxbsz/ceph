@@ -1703,7 +1703,6 @@ int Client::make_request(MetaRequest *request,
   std::unique_lock cl{client_lock, std::adopt_lock};
   // assign a unique tid
   ceph_tid_t tid = ++last_tid;
-
   request->set_tid(tid);
 
   // and timestamp
@@ -1790,30 +1789,30 @@ int Client::make_request(MetaRequest *request,
     } else {
       session = _get_session(mds_sessions.at(mds));
     }
-    cl.unlock();
-    std::lock_guard l{session->session_lock};
 
-    // send request.
-    send_request(request, session);
+    {
+      cl.unlock();
+      std::lock_guard l{session->session_lock};
+      cl.lock();
+
+      // send request.
+      send_request(request, session);
+    }
 
     // wait for signal
     ldout(cct, 20) << "awaiting reply|forward|kick on " << &caller_cond << dendl;
     request->kick = false;
-    std::unique_lock l{client_lock, std::adopt_lock};
-    caller_cond.wait(l, [request] {
+    caller_cond.wait(cl, [request] {
       return (request->reply ||	          // reply
 	      request->resend_mds >= 0 || // forward
 	      request->kick);
     });
-    l.release();
     request->caller_cond = nullptr;
 
     // did we get a reply?
     if (request->reply) 
       break;
   }
-
-  std::lock_guard l{session->session_lock};
 
   if (!request->reply) {
     ceph_assert(request->aborted());
@@ -1822,6 +1821,7 @@ int Client::make_request(MetaRequest *request,
     request->item.remove_myself();
     unregister_request(request);
     put_request(request);
+    cl.release();
     return r;
   }
 
@@ -1836,7 +1836,11 @@ int Client::make_request(MetaRequest *request,
   request->dispatch_cond->notify_all();
   ldout(cct, 20) << "sendrecv kickback on tid " << tid << " " << request->dispatch_cond << dendl;
   request->dispatch_cond = 0;
-  
+
+  cl.unlock();
+  std::lock_guard l{session->session_lock};
+  cl.lock();
+
   if (r >= 0 && ptarget)
     r = verify_reply_trace(r, session, request, reply, ptarget, pcreated, perms);
 
@@ -1852,6 +1856,7 @@ int Client::make_request(MetaRequest *request,
   logger->tinc(l_c_reply, lat);
 
   put_request(request);
+  cl.release();
   return r;
 }
 
@@ -2124,15 +2129,11 @@ void Client::_closed_mds_session(MetaSession *s, int err, bool rejected)
     s->state = MetaSession::STATE_CLOSED;
   s->con->mark_down();
 
+  signal_context_list(s);
   client_lock.lock();
-  signal_context_list(s->waiting_for_open);
   mount_cond.notify_all();
   remove_session_caps(s, err);
-  client_lock.unlock();
-
   kick_requests_closed(s);
-
-  client_lock.lock();
   mds_ranks_closing.erase(s->mds_num);
   if (s->state == MetaSession::STATE_CLOSED) {
     mds_sessions.erase(s->mds_num);
@@ -2143,17 +2144,19 @@ void Client::_closed_mds_session(MetaSession *s, int err, bool rejected)
 
 void Client::handle_client_session(const MConstRef<MClientSession>& m)
 {
+  std::unique_lock cl{client_lock, std::adopt_lock};
   mds_rank_t from = mds_rank_t(m->get_source().num());
   ldout(cct, 10) << __func__ << " " << *m << " from mds." << from << dendl;
 
   MetaSession *session = _get_mds_session(from, m->get_connection().get());
   if (!session) {
     ldout(cct, 10) << " discarding session message from sessionless mds " << m->get_source_inst() << dendl;
+    cl.release();
     return;
   }
 
-  client_lock.unlock();
-  session->session_lock.lock();
+  cl.unlock();
+  std::lock_guard sl{session->session_lock};
   switch (m->get_op()) {
   case CEPH_SESSION_OPEN:
     {
@@ -2171,13 +2174,13 @@ void Client::handle_client_session(const MConstRef<MClientSession>& m)
 
       renew_caps(session);
 
-      client_lock.lock();
+      cl.lock();
       if (unmounting)
 	mount_cond.notify_all();
       else
 	connect_mds_targets(from);
-      signal_context_list(session->waiting_for_open);
-      client_lock.unlock();
+      signal_context_list(session);
+      cl.unlock();
       break;
     }
 
@@ -2188,12 +2191,12 @@ void Client::handle_client_session(const MConstRef<MClientSession>& m)
   case CEPH_SESSION_RENEWCAPS:
     if (session->cap_renew_seq == m->get_seq()) {
       bool was_stale = ceph_clock_now() >= session->cap_ttl;
-      client_lock.lock();
+      cl.lock();
       session->cap_ttl =
 	session->last_cap_renew_request + mdsmap->get_session_timeout();
-      client_lock.unlock();
       if (was_stale)
 	wake_up_session_caps(session, false);
+      cl.unlock();
     }
     break;
 
@@ -2202,15 +2205,15 @@ void Client::handle_client_session(const MConstRef<MClientSession>& m)
     session->cap_gen++;
     session->cap_ttl = ceph_clock_now();
     session->cap_ttl -= 1;
-    client_lock.lock();
+    cl.lock();
     renew_caps(session);
-    client_lock.unlock();
+    cl.unlock();
     break;
 
   case CEPH_SESSION_RECALL_STATE:
-    client_lock.lock();
+    cl.lock();
     trim_caps(session, m->get_max_caps());
-    client_lock.unlock();
+    cl.unlock();
     break;
 
   case CEPH_SESSION_FLUSHMSG:
@@ -2222,9 +2225,9 @@ void Client::handle_client_session(const MConstRef<MClientSession>& m)
     break;
 
   case CEPH_SESSION_FORCE_RO:
-    client_lock.lock();
+    cl.lock();
     force_session_readonly(session);
-    client_lock.unlock();
+    cl.unlock();
     break;
 
   case CEPH_SESSION_REJECT:
@@ -2237,17 +2240,17 @@ void Client::handle_client_session(const MConstRef<MClientSession>& m)
 	error_str = "unknown error";
       lderr(cct) << "mds." << from << " rejected us (" << error_str << ")" << dendl;
 
-      client_lock.lock();
+      cl.lock();
       _closed_mds_session(session, -EPERM, true);
-      client_lock.unlock();
+      cl.unlock();
     }
     break;
 
   default:
     ceph_abort();
   }
-  session->session_lock.unlock();
-  client_lock.lock();
+  cl.lock();
+  cl.release();
 }
 
 bool Client::_any_stale_sessions()
@@ -2288,7 +2291,6 @@ void Client::_kick_stale_sessions()
 void Client::send_request(MetaRequest *request, MetaSession *session,
 			  bool drop_cap_releases)
 {
-  ceph_assert(!ceph_mutex_is_locked_by_me(client_lock));
   ceph_assert(ceph_mutex_is_locked_by_me(session->session_lock));
 
   // make the request
@@ -2384,6 +2386,7 @@ void Client::handle_client_request_forward(const MConstRef<MClientRequestForward
   if (!session) {
     return;
   }
+  _put_session(session);
   ceph_tid_t tid = fwd->get_tid();
 
   if (mds_requests.count(tid) == 0) {
@@ -2425,11 +2428,18 @@ bool Client::is_dir_operation(MetaRequest *req)
 
 void Client::handle_client_reply(const MConstRef<MClientReply>& reply)
 {
+  std::unique_lock cl{client_lock, std::adopt_lock};
+
   mds_rank_t mds_num = mds_rank_t(reply->get_source().num());
   MetaSession *session = _get_mds_session(mds_num, reply->get_connection().get());
   if (!session) {
+    cl.release();
     return;
   }
+
+  cl.unlock();
+  std::lock_guard sl{session->session_lock};
+  cl.lock();
 
   ceph_tid_t tid = reply->get_tid();
   bool is_safe = reply->is_safe();
@@ -2437,6 +2447,7 @@ void Client::handle_client_reply(const MConstRef<MClientReply>& reply)
   if (mds_requests.count(tid) == 0) {
     lderr(cct) << __func__ << " no pending request on tid " << tid
 	       << " safe is:" << is_safe << dendl;
+    cl.release();
     return;
   }
   MetaRequest *request = mds_requests.at(tid);
@@ -2448,6 +2459,7 @@ void Client::handle_client_reply(const MConstRef<MClientReply>& reply)
     //duplicate response
     ldout(cct, 0) << "got a duplicate reply on tid " << tid << " from mds "
 	    << mds_num << " safe:" << is_safe << dendl;
+    cl.release();
     return;
   }
 
@@ -2466,6 +2478,7 @@ void Client::handle_client_reply(const MConstRef<MClientReply>& reply)
       ldout(cct, 20) << "have to return ESTALE" << dendl;
     } else {
       request->caller_cond->notify_all();
+      cl.release();
       return;
     }
   }
@@ -2500,15 +2513,13 @@ void Client::handle_client_reply(const MConstRef<MClientReply>& reply)
     request->caller_cond->notify_all();
 
     // wake for kick back
-    std::unique_lock l{client_lock, std::adopt_lock};
-    cond.wait(l, [tid, request, &cond, this] {
+    cond.wait(cl, [tid, request, &cond, this] {
       if (request->dispatch_cond) {
         ldout(cct, 20) << "handle_client_reply awaiting kickback on tid "
 		       << tid << " " << &cond << dendl;
       }
       return !request->dispatch_cond;
     });
-    l.release();
   }
 
   if (is_safe) {
@@ -2525,6 +2536,8 @@ void Client::handle_client_reply(const MConstRef<MClientReply>& reply)
   }
   if (unmounting)
     mount_cond.notify_all();
+
+  cl.release();
 }
 
 void Client::_handle_full_flag(int64_t pool)
@@ -2761,14 +2774,16 @@ void Client::handle_fs_map_user(const MConstRef<MFSMapUser>& m)
 
 void Client::handle_mds_map(const MConstRef<MMDSMap>& m)
 {
-  client_lock.unlock();
+  std::unique_lock cl{client_lock, std::adopt_lock};
+  cl.unlock();
 
   mds_gid_t old_inc, new_inc;
   if (m->get_epoch() <= mdsmap->get_epoch()) {
     ldout(cct, 1) << __func__ << " epoch " << m->get_epoch()
                   << " is identical to or older than our "
                   << mdsmap->get_epoch() << dendl;
-    client_lock.lock();
+    cl.lock();
+    cl.release();
     return;
   }
 
@@ -2807,7 +2822,7 @@ void Client::handle_mds_map(const MConstRef<MMDSMap>& m)
     }
   }
 
-  client_lock.lock();
+  cl.lock();
   // reset session
   for (auto p = mds_sessions.begin(); p != mds_sessions.end(); ) {
     mds_rank_t mds = p->first;
@@ -2816,7 +2831,7 @@ void Client::handle_mds_map(const MConstRef<MMDSMap>& m)
 
     int oldstate = mdsmap->get_state(mds);
     old_inc = mdsmap->get_incarnation(mds);
-    client_lock.unlock();
+    cl.unlock();
 
     int newstate = newmap->get_state(mds);
     new_inc = newmap->get_incarnation(mds);
@@ -2835,9 +2850,9 @@ void Client::handle_mds_map(const MConstRef<MMDSMap>& m)
         // When new MDS starts to take over, notify kernel to trim unused entries
         // in its dcache/icache. Hopefully, the kernel will release some unused
         // inodes before the new MDS enters reconnect state.
-        client_lock.lock();
+        cl.lock();
         trim_cache_for_reconnect(session);
-        client_lock.unlock();
+        cl.unlock();
       } else if (oldstate == newstate) {
         goto next;  // no change
       }
@@ -2845,7 +2860,9 @@ void Client::handle_mds_map(const MConstRef<MMDSMap>& m)
       session->mds_state = newstate;
       if (newstate == MDSMap::STATE_RECONNECT) {
         session->con = messenger->connect_to_mds(session->addrs);
+        cl.lock();
         send_reconnect(session);
+        cl.unlock();
       } else if (newstate > MDSMap::STATE_RECONNECT) {
         if (oldstate < MDSMap::STATE_RECONNECT) {
           ldout(cct, 1) << "we may miss the MDSMap::RECONNECT, close mds session ... " << dendl;
@@ -2853,19 +2870,15 @@ void Client::handle_mds_map(const MConstRef<MMDSMap>& m)
           goto next;
         }
         if (newstate >= MDSMap::STATE_ACTIVE) {
+          cl.lock();
           if (oldstate < MDSMap::STATE_ACTIVE) {
             kick_requests(session); // kick new requests
-
-            client_lock.lock();
             kick_flushing_caps(session);
-            signal_context_list(session->waiting_for_open);
-            client_lock.unlock();
-
+            signal_context_list(session);
             wake_up_session_caps(session, true);
           }
-          client_lock.lock();
           connect_mds_targets(mds);
-          client_lock.unlock();
+          cl.unlock();
         }
       } else if (newstate == MDSMap::STATE_NULL &&
                  mds >= newmap->get_max_mds()) {
@@ -2873,7 +2886,7 @@ void Client::handle_mds_map(const MConstRef<MMDSMap>& m)
       }
     }
 next:
-    client_lock.lock();
+    cl.lock();
     _put_session(session);
   }
 
@@ -2882,19 +2895,21 @@ next:
 
   monclient->sub_got("mdsmap", newmap->get_epoch());
   newmap.swap(mdsmap);
+  cl.release();
 }
 
 void Client::send_reconnect(MetaSession *session)
 {
   ceph_assert(!ceph_mutex_is_locked_by_me(client_lock));
 
+  auto m = make_message<MClientReconnect>();
+  bool allow_multi = session->mds_features.test(CEPHFS_FEATURE_MULTI_RECONNECT);
+
   mds_rank_t mds = session->mds_num;
   ldout(cct, 10) << __func__ << " to mds." << mds << dendl;
 
   // trim unused caps to reduce MDS's cache rejoin time
-  client_lock.lock();
   trim_cache_for_reconnect(session);
-  client_lock.unlock();
 
   session->readonly = false;
 
@@ -2903,16 +2918,11 @@ void Client::send_reconnect(MetaSession *session)
   // reset my cap seq number
   session->seq = 0;
   //connect to the mds' offload targets
-  client_lock.lock();
   connect_mds_targets(mds);
-  client_lock.unlock();
   //make sure unsafe requests get saved
   resend_unsafe_requests(session);
 
   early_kick_flushing_caps(session);
-
-  auto m = make_message<MClientReconnect>();
-  bool allow_multi = session->mds_features.test(CEPHFS_FEATURE_MULTI_RECONNECT);
 
   // i have an open session.
   ceph::unordered_set<inodeno_t> did_snaprealm;
@@ -3130,12 +3140,17 @@ void Client::handle_lease(const MConstRef<MClientLease>& m)
     return;
   }
 
-  got_mds_push(session);
+  client_lock.unlock();
+  {
+    std::lock_guard sl{session->session_lock};
+    got_mds_push(session);
+  }
 
   ceph_seq_t seq = m->get_seq();
 
   Inode *in;
   vinodeno_t vino(m->get_ino(), CEPH_NOSNAP);
+  client_lock.lock();
   if (inode_map.count(vino) == 0) {
     ldout(cct, 10) << " don't have vino " << vino << dendl;
     goto revoke;
@@ -3151,6 +3166,7 @@ void Client::handle_lease(const MConstRef<MClientLease>& m)
     ldout(cct, 10) << " revoked DN lease on " << dn << dendl;
     dn->lease_mds = -1;
   }
+  client_lock.unlock();
 
  revoke:
   {
@@ -3159,6 +3175,7 @@ void Client::handle_lease(const MConstRef<MClientLease>& m)
 					    m->get_first(), m->get_last(), m->dname);
     m->get_connection()->send_message2(std::move(reply));
   }
+  client_lock.lock();
 }
 
 void Client::put_inode(Inode *in, int n)
@@ -3975,8 +3992,10 @@ void Client::wait_on_context_list(MetaSession *session)
   l.release();
 }
 
-void Client::signal_context_list(list<Context*>& ls)
+void Client::signal_context_list(MetaSession *session)
 {
+  list<Context*>& ls = session->waiting_for_open;
+
   while (!ls.empty()) {
     ls.front()->complete(0);
     ls.pop_front();
@@ -3985,8 +4004,6 @@ void Client::signal_context_list(list<Context*>& ls)
 
 void Client::wake_up_session_caps(MetaSession *s, bool reconnect)
 {
-  ceph_assert(!ceph_mutex_is_not_locked_by_me(client_lock));
-
   for (const auto &cap : s->caps) {
     auto &in = cap->inode;
     if (reconnect) {
@@ -4001,9 +4018,7 @@ void Client::wake_up_session_caps(MetaSession *s, bool reconnect)
 	  in.flags |= I_CAP_DROPPED;
       }
     }
-    client_lock.lock();
     signal_cond_list(in.waitfor_caps);
-    client_lock.unlock();
   }
 }
 
@@ -4957,18 +4972,25 @@ void Client::update_snap_trace(const bufferlist& bl, SnapRealm **realm_ret, bool
 
 void Client::handle_snap(const MConstRef<MClientSnap>& m)
 {
+  std::unique_lock cl{client_lock, std::adopt_lock};
   ldout(cct, 10) << __func__ << " " << *m << dendl;
   mds_rank_t mds = mds_rank_t(m->get_source().num());
   MetaSession *session = _get_mds_session(mds, m->get_connection().get());
   if (!session) {
+    cl.release();
     return;
   }
 
-  got_mds_push(session);
+  cl.unlock();
+  {
+    std::lock_guard sl{session->session_lock};
+    got_mds_push(session);
+  }
 
   map<Inode*, SnapContext> to_move;
   SnapRealm *realm = 0;
 
+  cl.lock();
   if (m->head.op == CEPH_SNAP_OP_SPLIT) {
     ceph_assert(m->head.split);
     SnapRealmInfo info;
@@ -4979,6 +5001,7 @@ void Client::handle_snap(const MConstRef<MClientSnap>& m)
     // flush, then move, ino's.
     realm = get_snap_realm(info.ino());
     ldout(cct, 10) << " splitting off " << *realm << dendl;
+
     for (auto& ino : m->split_inos) {
       vinodeno_t vino(ino, CEPH_NOSNAP);
       if (inode_map.count(vino)) {
@@ -5024,21 +5047,29 @@ void Client::handle_snap(const MConstRef<MClientSnap>& m)
     }
     put_snap_realm(realm);
   }
+  cl.release();
 }
 
 void Client::handle_quota(const MConstRef<MClientQuota>& m)
 {
+  std::unique_lock cl{client_lock, std::adopt_lock};
   mds_rank_t mds = mds_rank_t(m->get_source().num());
   MetaSession *session = _get_mds_session(mds, m->get_connection().get());
   if (!session) {
+    cl.release();
     return;
   }
 
-  got_mds_push(session);
+  cl.unlock();
+  {
+    std::lock_guard sl{session->session_lock};
+    got_mds_push(session);
+  }
 
   ldout(cct, 10) << __func__ << " " << *m << " from mds." << mds << dendl;
 
   vinodeno_t vino(m->ino, CEPH_NOSNAP);
+  cl.lock();
   if (inode_map.count(vino)) {
     Inode *in = NULL;
     in = inode_map[vino];
@@ -5048,6 +5079,7 @@ void Client::handle_quota(const MConstRef<MClientQuota>& m)
       in->rstat = m->rstat;
     }
   }
+  cl.release();
 }
 
 void Client::handle_caps(const MConstRef<MClientCaps>& m)
@@ -5058,6 +5090,9 @@ void Client::handle_caps(const MConstRef<MClientCaps>& m)
     return;
   }
 
+  client_lock.unlock();
+  std::lock_guard sl{session->session_lock};
+  client_lock.lock();
   if (m->osd_epoch_barrier && !objecter->have_map(m->osd_epoch_barrier)) {
     // Pause RADOS operations until we see the required epoch
     objecter->set_epoch_barrier(m->osd_epoch_barrier);
@@ -6491,7 +6526,8 @@ void Client::tick()
       signal_cond_list(waiting_for_mdsmap);
       for (auto &p : mds_sessions) {
         MetaSession *s = _get_session(p.second);
-	signal_context_list(s->waiting_for_open);
+	std::lock_guard sl{s->session_lock};
+	signal_context_list(s);
         _put_session(s);
       }
     }
@@ -14835,7 +14871,7 @@ void Client::set_session_timeout(unsigned timeout)
 int Client::start_reclaim(const std::string& uuid, unsigned flags,
 			  const std::string& fs_name)
 {
-  std::unique_lock l(client_lock);
+  std::unique_lock cl(client_lock);
   if (!initialized)
     return -ENOTCONN;
 
@@ -14871,24 +14907,32 @@ int Client::start_reclaim(const std::string& uuid, unsigned flags,
     MetaSession *session;
     if (!have_open_session(mds)) {
       session = _get_or_open_mds_session(mds);
+      cl.unlock();
+      std::lock_guard sl(session->session_lock);
       if (session->state == MetaSession::STATE_REJECTED) {
         _put_session(session);
+        cl.lock();
 	return -EPERM;
       }
       if (session->state != MetaSession::STATE_OPENING) {
         _put_session(session);
+        cl.lock();
 	// umounting?
 	return -EINVAL;
       }
       ldout(cct, 10) << "waiting for session to mds." << mds << " to open" << dendl;
-      wait_on_context_list(session->waiting_for_open);
+      wait_on_context_list(session);
       _put_session(session);
+      cl.lock();
       continue;
     }
 
     session = _get_session(mds_sessions.at(mds));
+    cl.unlock();
+    std::lock_guard sl(session->session_lock);
     if (!session->mds_features.test(CEPHFS_FEATURE_RECLAIM_CLIENT)) {
       _put_session(session);
+      cl.lock();
       return -EOPNOTSUPP;
     }
 
@@ -14897,7 +14941,9 @@ int Client::start_reclaim(const std::string& uuid, unsigned flags,
       session->reclaim_state = MetaSession::RECLAIMING;
       auto m = make_message<MClientReclaim>(uuid, flags);
       session->con->send_message2(std::move(m));
+      cl.lock();
       wait_on_list(waiting_for_reclaim);
+      cl.unlock();
     } else if (session->reclaim_state == MetaSession::RECLAIM_FAIL) {
       return reclaim_errno ? : -ENOTRECOVERABLE;
     } else {
@@ -14920,9 +14966,9 @@ int Client::start_reclaim(const std::string& uuid, unsigned flags,
   // (config option mds_session_blacklist_on_evict needs to be true)
   ldout(cct, 10) << __func__ << ": waiting for OSD epoch " << reclaim_osd_epoch << dendl;
   bs::error_code ec;
-  l.unlock();
+  cl.unlock();
   objecter->wait_for_map(reclaim_osd_epoch, ca::use_blocked[ec]);
-  l.lock();
+  cl.lock();
 
   if (ec)
     return ceph::from_error_code(ec);
@@ -14964,14 +15010,20 @@ void Client::finish_reclaim()
 
 void Client::handle_client_reclaim_reply(const MConstRef<MClientReclaimReply>& reply)
 {
+  std::unique_lock cl{client_lock, std::adopt_lock};
   mds_rank_t from = mds_rank_t(reply->get_source().num());
   ldout(cct, 10) << __func__ << " " << *reply << " from mds." << from << dendl;
 
   MetaSession *session = _get_mds_session(from, reply->get_connection().get());
   if (!session) {
     ldout(cct, 10) << " discarding reclaim reply from sessionless mds." <<  from << dendl;
+    cl.release();
     return;
   }
+
+  cl.unlock();
+  std::lock_guard sl{session->session_lock};
+  cl.lock();
 
   if (reply->get_result() >= 0) {
     session->reclaim_state = MetaSession::RECLAIM_OK;
@@ -14985,6 +15037,7 @@ void Client::handle_client_reclaim_reply(const MConstRef<MClientReclaimReply>& r
   }
 
   signal_cond_list(waiting_for_reclaim);
+  cl.release();
 }
 
 /**
