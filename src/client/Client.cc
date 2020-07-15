@@ -2102,21 +2102,31 @@ void Client::_close_mds_session(MetaSession *s)
 
 void Client::_closed_mds_session(MetaSession *s, int err, bool rejected)
 {
+  ceph_assert(!ceph_mutex_is_locked_by_me(client_lock));
+  ceph_assert(ceph_mutex_is_locked_by_me(session->session_lock));
+
   ldout(cct, 5) << __func__ << " mds." << s->mds_num << " seq " << s->seq << dendl;
   if (rejected && s->state != MetaSession::STATE_CLOSING)
     s->state = MetaSession::STATE_REJECTED;
   else
     s->state = MetaSession::STATE_CLOSED;
   s->con->mark_down();
+
+  client_lock.lock();
   signal_context_list(s->waiting_for_open);
   mount_cond.notify_all();
   remove_session_caps(s, err);
+  client_lock.unlock();
+
   kick_requests_closed(s);
+
+  client_lock.lock();
   mds_ranks_closing.erase(s->mds_num);
   if (s->state == MetaSession::STATE_CLOSED) {
     mds_sessions.erase(s->mds_num);
     _release_session(s);
   }
+  client_lock.unlock();
 }
 
 void Client::handle_client_session(const MConstRef<MClientSession>& m)
@@ -2130,6 +2140,8 @@ void Client::handle_client_session(const MConstRef<MClientSession>& m)
     return;
   }
 
+  client_lock.unlock();
+  session->session_lock.lock();
   switch (m->get_op()) {
   case CEPH_SESSION_OPEN:
     {
@@ -2139,23 +2151,29 @@ void Client::handle_client_session(const MConstRef<MClientSession>& m)
 	lderr(cct) << "mds." << from << " lacks required features '"
 		   << missing_features << "', closing session " << dendl;
 	_close_mds_session(session);
+        client_lock.lock();
 	_closed_mds_session(session, -EPERM, true);
+        client_lock.unlock();
 	break;
       }
       session->mds_features = std::move(m->supported_features);
-
-      renew_caps(session);
       session->state = MetaSession::STATE_OPEN;
+
+      client_lock.lock();
+      renew_caps(session);
       if (unmounting)
 	mount_cond.notify_all();
       else
 	connect_mds_targets(from);
       signal_context_list(session->waiting_for_open);
+      client_lock.unlock();
       break;
     }
 
   case CEPH_SESSION_CLOSE:
+    client_lock.lock();
     _closed_mds_session(session);
+    client_lock.unlock();
     break;
 
   case CEPH_SESSION_RENEWCAPS:
@@ -2173,11 +2191,15 @@ void Client::handle_client_session(const MConstRef<MClientSession>& m)
     session->cap_gen++;
     session->cap_ttl = ceph_clock_now();
     session->cap_ttl -= 1;
+    client_lock.lock();
     renew_caps(session);
+    client_lock.unlock();
     break;
 
   case CEPH_SESSION_RECALL_STATE:
+    client_lock.lock();
     trim_caps(session, m->get_max_caps());
+    client_lock.unlock();
     break;
 
   case CEPH_SESSION_FLUSHMSG:
@@ -2189,7 +2211,9 @@ void Client::handle_client_session(const MConstRef<MClientSession>& m)
     break;
 
   case CEPH_SESSION_FORCE_RO:
+    client_lock.lock();
     force_session_readonly(session);
+    client_lock.unlock();
     break;
 
   case CEPH_SESSION_REJECT:
@@ -2202,13 +2226,17 @@ void Client::handle_client_session(const MConstRef<MClientSession>& m)
 	error_str = "unknown error";
       lderr(cct) << "mds." << from << " rejected us (" << error_str << ")" << dendl;
 
+      client_lock.lock();
       _closed_mds_session(session, -EPERM, true);
+      client_lock.unlock();
     }
     break;
 
   default:
     ceph_abort();
   }
+  session->session_lock.unlock();
+  client_lock.lock();
 }
 
 bool Client::_any_stale_sessions()
@@ -2249,6 +2277,9 @@ void Client::_kick_stale_sessions()
 void Client::send_request(MetaRequest *request, MetaSession *session,
 			  bool drop_cap_releases)
 {
+  ceph_assert(!ceph_mutex_is_locked_by_me(client_lock));
+  ceph_assert(ceph_mutex_is_locked_by_me(session->session_lock));
+
   // make the request
   mds_rank_t mds = session->mds_num;
   ldout(cct, 10) << __func__ << " rebuilding request " << request->get_tid()
@@ -2811,12 +2842,16 @@ void Client::handle_mds_map(const MConstRef<MMDSMap>& m)
         if (newstate >= MDSMap::STATE_ACTIVE) {
           if (oldstate < MDSMap::STATE_ACTIVE) {
             // kick new requests
+            client_lock.lock();
             kick_requests(session);
             kick_flushing_caps(session);
             signal_context_list(session->waiting_for_open);
             wake_up_session_caps(session, true);
+            client_lock.unlock();
           }
+          client_lock.lock();
           connect_mds_targets(mds);
+          client_lock.unlock();
         }
       } else if (newstate == MDSMap::STATE_NULL &&
                  mds >= newmap->get_max_mds()) {
@@ -2837,11 +2872,15 @@ next:
 
 void Client::send_reconnect(MetaSession *session)
 {
+  ceph_assert(!ceph_mutex_is_locked_by_me(client_lock));
+
   mds_rank_t mds = session->mds_num;
   ldout(cct, 10) << __func__ << " to mds." << mds << dendl;
 
   // trim unused caps to reduce MDS's cache rejoin time
+  client_lock.lock();
   trim_cache_for_reconnect(session);
+  client_lock.unlock();
 
   session->readonly = false;
 
@@ -2850,7 +2889,9 @@ void Client::send_reconnect(MetaSession *session)
   // reset my cap seq number
   session->seq = 0;
   //connect to the mds' offload targets
+  client_lock.lock();
   connect_mds_targets(mds);
+  client_lock.unlock();
   //make sure unsafe requests get saved
   resend_unsafe_requests(session);
 
@@ -2932,6 +2973,8 @@ void Client::send_reconnect(MetaSession *session)
 
 void Client::kick_requests(MetaSession *session)
 {
+  ceph_assert(ceph_mutex_is_locked_by_me(session->session_lock));
+
   ldout(cct, 10) << __func__ << " for mds." << session->mds_num << dendl;
   for (map<ceph_tid_t, MetaRequest*>::iterator p = mds_requests.begin();
        p != mds_requests.end();
@@ -2956,6 +2999,8 @@ void Client::kick_requests(MetaSession *session)
 
 void Client::resend_unsafe_requests(MetaSession *session)
 {
+  ceph_assert(ceph_mutex_is_locked_by_me(session->session_lock));
+
   for (xlist<MetaRequest*>::iterator iter = session->unsafe_requests.begin();
        !iter.end();
        ++iter)
@@ -2963,6 +3008,7 @@ void Client::resend_unsafe_requests(MetaSession *session)
 
   // also re-send old requests when MDS enters reconnect stage. So that MDS can
   // process completed requests in clientreplay stage.
+  client_lock.lock();
   for (map<ceph_tid_t, MetaRequest*>::iterator p = mds_requests.begin();
        p != mds_requests.end();
        ++p) {
@@ -2976,6 +3022,7 @@ void Client::resend_unsafe_requests(MetaSession *session)
     if (req->mds == session->mds_num)
       send_request(req, session, true);
   }
+  client_lock.unlock();
 }
 
 void Client::wait_unsafe_requests()
@@ -3003,6 +3050,8 @@ void Client::wait_unsafe_requests()
 
 void Client::kick_requests_closed(MetaSession *session)
 {
+  ceph_assert(ceph_mutex_is_locked_by_me(session->session_lock));
+
   ldout(cct, 10) << __func__ << " for mds." << session->mds_num << dendl;
   for (map<ceph_tid_t, MetaRequest*>::iterator p = mds_requests.begin();
        p != mds_requests.end(); ) {
