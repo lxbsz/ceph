@@ -610,6 +610,7 @@ public:
   virtual void shutdown();
 
   // messaging
+  void cancel_commands(std::unique_ptr<MDSMap>& newmap);
   void handle_mds_map(const MConstRef<MMDSMap>& m);
   void handle_fs_map(const MConstRef<MFSMap>& m);
   void handle_fs_map_user(const MConstRef<MFSMapUser>& m);
@@ -1221,6 +1222,7 @@ private:
   std::unique_ptr<FSMapUser> fsmap_user;
 
   // MDS command state
+  ceph::mutex command_lock = ceph::make_mutex("Client::command_lock");
   CommandTable<MDSCommandOp> command_table;
 
   bool _use_faked_inos;
