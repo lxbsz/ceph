@@ -1553,20 +1553,17 @@ out:
   return mds;
 }
 
-
 void Client::connect_mds_targets(mds_rank_t mds)
 {
   ldout(cct, 10) << __func__ << " for mds." << mds << dendl;
   ceph_assert(mds_sessions.count(mds));
   const MDSMap::mds_info_t& info = mdsmap->get_mds_info(mds);
-  for (set<mds_rank_t>::const_iterator q = info.export_targets.begin();
-       q != info.export_targets.end();
-       ++q) {
-    if (mds_sessions.count(*q) == 0 &&
-	mdsmap->is_clientreplay_or_active_or_stopping(*q)) {
+  for (const auto &rank : info.export_targets) {
+    if (mds_sessions.count(rank) == 0 &&
+	mdsmap->is_clientreplay_or_active_or_stopping(rank)) {
       ldout(cct, 10) << "check_mds_sessions opening mds." << mds
-		     << " export target mds." << *q << dendl;
-      _open_mds_session(*q);
+		     << " export target mds." << rank << dendl;
+      _open_mds_session(rank);
     }
   }
 }
@@ -1587,6 +1584,7 @@ void Client::dump_mds_sessions(Formatter *f, bool cap_dump)
   f->close_section();
   f->dump_int("mdsmap_epoch", mdsmap->get_epoch());
 }
+
 void Client::dump_mds_requests(Formatter *f)
 {
   for (map<ceph_tid_t, MetaRequest*>::iterator p = mds_requests.begin();
@@ -2618,8 +2616,6 @@ bool Client::ms_dispatch2(const MessageRef &m)
     ldout(cct, 10) << "inactive, discarding " << *m << dendl;
     return true;
   }
-//  if (!is_initialized())
-//    return true;
 
   std::scoped_lock l(client_lock);
 
@@ -2715,8 +2711,41 @@ void Client::handle_fs_map_user(const MConstRef<MFSMapUser>& m)
   signal_cond_list(waiting_for_fsmap);
 }
 
+// Cancel all the commands for missing or laggy GIDs
+void Client::cancel_commands(std::unique_ptr<MDSMap>& newmap)
+{
+  std::scoped_lock cmd_lock(command_lock);
+  std::vector<ceph_tid_t> cancel_ops;
+  auto &commands = command_table.get_commands();
+  for (const auto &[tid, op] : commands) {
+    const mds_gid_t op_mds_gid = op.mds_gid;
+    if (newmap->is_dne_gid(op_mds_gid) || newmap->is_laggy_gid(op_mds_gid)) {
+      ldout(cct, 1) << __func__ << ": cancelling command op " << tid << dendl;
+      cancel_ops.push_back(tid);
+      if (op.outs) {
+        std::ostringstream ss;
+        ss << "MDS " << op_mds_gid << " went away";
+        *(op.outs) = ss.str();
+      }
+      /*
+       * No need to make the con->mark_down under
+       * client_lock here, because the con will
+       * has its own lock.
+       */
+      op.con->mark_down();
+      if (op.on_finish) {
+        op.on_finish->complete(-ETIMEDOUT);
+      }
+    }
+  }
+
+  for (const auto &tid : cancel_ops)
+    command_table.erase(tid);
+}
+
 void Client::handle_mds_map(const MConstRef<MMDSMap>& m)
 {
+  std::unique_lock cl{client_lock, std::adopt_lock};
   mds_gid_t old_inc, new_inc;
   if (m->get_epoch() <= mdsmap->get_epoch()) {
     ldout(cct, 1) << __func__ << " epoch " << m->get_epoch()
@@ -2725,37 +2754,13 @@ void Client::handle_mds_map(const MConstRef<MMDSMap>& m)
     return;
   }
 
+  cl.unlock();
   ldout(cct, 1) << __func__ << " epoch " << m->get_epoch() << dendl;
 
   std::unique_ptr<MDSMap> oldmap(new MDSMap);
-
   oldmap->decode(m->get_encoded());
-
-  // Cancel any commands for missing or laggy GIDs
-  std::list<ceph_tid_t> cancel_ops;
-  auto &commands = command_table.get_commands();
-  for (const auto &i : commands) {
-    auto &op = i.second;
-    const mds_gid_t op_mds_gid = op.mds_gid;
-    if (oldmap->is_dne_gid(op_mds_gid) || oldmap->is_laggy_gid(op_mds_gid)) {
-      ldout(cct, 1) << __func__ << ": cancelling command op " << i.first << dendl;
-      cancel_ops.push_back(i.first);
-      if (op.outs) {
-        std::ostringstream ss;
-        ss << "MDS " << op_mds_gid << " went away";
-        *(op.outs) = ss.str();
-      }
-      op.con->mark_down();
-      if (op.on_finish) {
-        op.on_finish->complete(-ETIMEDOUT);
-      }
-    }
-  }
-
-  for (std::list<ceph_tid_t>::iterator i = cancel_ops.begin();
-       i != cancel_ops.end(); ++i) {
-    command_table.erase(*i);
-  }
+  cancel_commands(oldmap);
+  cl.lock();
 
   oldmap.swap(mdsmap);
 
@@ -2816,6 +2821,7 @@ void Client::handle_mds_map(const MConstRef<MMDSMap>& m)
   signal_cond_list(waiting_for_mdsmap);
 
   monclient->sub_got("mdsmap", mdsmap->get_epoch());
+  cl.release();
 }
 
 void Client::send_reconnect(MetaSession *session)
@@ -5864,7 +5870,7 @@ int Client::mds_command(
   if (!iref_reader.is_state_satisfied())
     return -ENOTCONN;
 
-  std::scoped_lock lock(client_lock);
+  std::unique_lock cl(client_lock);
 
   int r;
   r = authenticate();
@@ -5912,23 +5918,28 @@ int Client::mds_command(
     // Open a connection to the target MDS
     ConnectionRef conn = messenger->connect_to_mds(info.get_addrs());
 
-    // Generate MDSCommandOp state
-    auto &op = command_table.start_command();
+    cl.unlock();
+    {
+      std::lock_guard cmd_lock(command_lock);
+      // Generate MDSCommandOp state
+      auto &op = command_table.start_command();
 
-    op.on_finish = gather.new_sub();
-    op.cmd = cmd;
-    op.outbl = outbl;
-    op.outs = outs;
-    op.inbl = inbl;
-    op.mds_gid = target_gid;
-    op.con = conn;
+      op.on_finish = gather.new_sub();
+      op.cmd = cmd;
+      op.outbl = outbl;
+      op.outs = outs;
+      op.inbl = inbl;
+      op.mds_gid = target_gid;
+      op.con = conn;
 
-    ldout(cct, 4) << __func__ << ": new command op to " << target_gid
-      << " tid=" << op.tid << cmd << dendl;
+      ldout(cct, 4) << __func__ << ": new command op to " << target_gid
+        << " tid=" << op.tid << cmd << dendl;
 
-    // Construct and send MCommand
-    auto m = op.get_message(monclient->get_fsid());
-    conn->send_message2(std::move(m));
+      // Construct and send MCommand
+      MessageRef m = op.get_message(monclient->get_fsid());
+      conn->send_message2(std::move(m));
+    }
+    cl.lock();
   }
   gather.activate();
 
@@ -5937,28 +5948,32 @@ int Client::mds_command(
 
 void Client::handle_command_reply(const MConstRef<MCommandReply>& m)
 {
+  std::unique_lock cl{client_lock, std::adopt_lock};
   ceph_tid_t const tid = m->get_tid();
 
   ldout(cct, 10) << __func__ << ": tid=" << m->get_tid() << dendl;
 
-  if (!command_table.exists(tid)) {
+  cl.unlock();
+  std::lock_guard cmd_lock(command_lock);
+  if (command_table.exists(tid)) {
+    auto &op = command_table.get_command(tid);
+    if (op.outbl) {
+      *op.outbl = m->get_data();
+    }
+    if (op.outs) {
+      *op.outs = m->rs;
+    }
+
+    if (op.on_finish) {
+      op.on_finish->complete(m->r);
+    }
+
+    command_table.erase(tid);
+  } else {
     ldout(cct, 1) << __func__ << ": unknown tid " << tid << ", dropping" << dendl;
-    return;
   }
-
-  auto &op = command_table.get_command(tid);
-  if (op.outbl) {
-    *op.outbl = m->get_data();
-  }
-  if (op.outs) {
-    *op.outs = m->rs;
-  }
-
-  if (op.on_finish) {
-    op.on_finish->complete(m->r);
-  }
-
-  command_table.erase(tid);
+  cl.lock();
+  cl.release();
 }
 
 // -------------------
