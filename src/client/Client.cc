@@ -491,8 +491,8 @@ void Client::_pre_init()
 
 int Client::init()
 {
-  destructive_lock_ref_t dlr(this, Client::STATE_INITIALIZED);
-  ceph_assert(!dlr.is_satisfied());
+  destructive_lock_ref_t dlr(this, Client::STATE_NEW);
+  ceph_assert(dlr.is_satisfied());
 
   _pre_init();
   {
@@ -5976,13 +5976,7 @@ int Client::mount(const std::string &mount_root, const UserPerm& perms,
 		  bool require_mds, const std::string &fs_name)
 {
   destructive_lock_ref_t dlr(this, Client::STATE_INITIALIZED);
-  if (!dlr.is_satisfied())
-    return -ENOTCONN;
-
-  if (is_mounted()) {
-    ldout(cct, 5) << "already mounted" << dendl;
-    return 0;
-  }
+  ceph_assert(dlr.is_satisfied());
 
   /*
    * To make sure that the _unmount() must wait until the mount()
@@ -6166,10 +6160,6 @@ void Client::_abort_mds_sessions(int err)
 
 void Client::_unmount(bool abort)
 {
-  destructive_lock_ref_t dlr(this, Client::STATE_INITIALIZED);
-  if (!dlr.is_satisfied())
-    return;
-
   destructive_lock_ref_t ulr(this, Client::STATE_UNMOUNTING, true);
   if (!ulr.unmounting_wait())
     return;
@@ -6347,25 +6337,7 @@ void Client::tick()
   ldout(cct, 21) << "tick" << dendl;
   utime_t now = ceph_clock_now();
 
-  if (is_unmounting() || is_unmounted()) {
-    if (!mds_requests.empty()) {
-      MetaRequest *req = mds_requests.begin()->second;
-      if (req->op_stamp + cct->_conf->client_mount_timeout < now) {
-        req->abort(-ETIMEDOUT);
-        if (req->caller_cond) {
-          req->kick = true;
-          req->caller_cond->notify_all();
-        }
-        signal_cond_list(waiting_for_mdsmap);
-        for (auto &p : mds_sessions) {
-	  signal_context_list(p.second.waiting_for_open);
-        }
-      }
-    }
-
-    tick_event = 0;
-    return;
-  } else {
+  if (is_mounting_or_mounted()) {
     tick_event = timer.add_event_after(
       cct->_conf->client_tick_interval,
       new LambdaContext([this](int) {
@@ -6373,7 +6345,23 @@ void Client::tick()
 	  ceph_assert(ceph_mutex_is_locked_by_me(client_lock));
 	  tick();
         }));
+  } else if (!mds_requests.empty()) {
+    MetaRequest *req = mds_requests.begin()->second;
+    if (req->op_stamp + cct->_conf->client_mount_timeout < now) {
+      req->abort(-ETIMEDOUT);
+      if (req->caller_cond) {
+        req->kick = true;
+        req->caller_cond->notify_all();
+      }
+      signal_cond_list(waiting_for_mdsmap);
+      for (auto &p : mds_sessions) {
+        signal_context_list(p.second.waiting_for_open);
+      }
+    }
   }
+
+    tick_event = 0;
+    return;
 
   if (mdsmap->get_epoch()) {
     // renew caps?
@@ -14948,11 +14936,13 @@ StandaloneClient::~StandaloneClient()
 
 int StandaloneClient::init()
 {
+  destructive_lock_ref_t dlr(this, Client::STATE_NEW);
+  ceph_assert(dlr.is_satisfied());
+
   _pre_init();
   objecter->init();
 
   client_lock.lock();
-  ceph_assert(!is_initialized());
 
   messenger->add_dispatcher_tail(objecter);
   messenger->add_dispatcher_tail(this);

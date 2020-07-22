@@ -984,29 +984,13 @@ protected:
     STATE_UNMOUNTED = STATE_INITIALIZED,
   } state;
 
-  bool is_new() {
-    std::lock_guard l{client->destructive_lock};
-    return state == STATE_NEW;
-  }
-  bool is_initialized() {
-    std::lock_guard l{client->destructive_lock};
-    return state >= STATE_INITIALIZED;
-  }
-  bool is_mounting() {
-    std::lock_guard l{client->destructive_lock};
-    return state == STATE_MOUNTING;
+  bool is_mounting_or_mounted() {
+    std::lock_guard l{destructive_lock};
+    return state == STATE_MOUNTED || state == STATE_MOUNTING;
   }
   bool is_mounted() {
-    std::lock_guard l{client->destructive_lock};
+    std::lock_guard l{destructive_lock};
     return state == STATE_MOUNTED;
-  }
-  bool is_unmounting() {
-    std::lock_guard l{client->destructive_lock};
-    return state == STATE_UNMOUNTING;
-  }
-  bool is_unmounted() {
-    std::lock_guard l{client->destructive_lock};
-    return state <= STATE_INITIALIZED;
   }
 
 private:
@@ -1339,39 +1323,34 @@ class destructive_lock_ref_t {
 public:
   destructive_lock_ref_t(const destructive_lock_ref_t &) = delete;
   destructive_lock_ref_t(const destructive_lock_ref_t &&) = delete;
-  destructive_lock_ref_t(class Client *c, Client::_state state, bool update_state) {
-    {
+  destructive_lock_ref_t(class Client *c, Client::_state state, bool update_state=false) {
+    if (update_state) {
       std::lock_guard l{c->destructive_lock};
       c->state = state;
-    }
 
-    satisfied = true; // always set it to true
-    type = Client::STATE_NULL;
-    client = c;
-  }
-
-  // Will add the refcnt if the client->state matches
-  destructive_lock_ref_t(class Client *c, Client::_state needed) {
-    {
+      satisfied = true; // always set it to true
+      type = Client::STATE_NULL;
+    } else {
       std::lock_guard l{c->destructive_lock};
 
-      if ((needed == Client::STATE_INITIALIZED &&
+      if ((state == Client::STATE_INITIALIZED &&
           c->state >= Client::STATE_INITIALIZED) ||
-          c->state == needed) {
+          c->state == state) {
         satisfied = true;
 
-        if (needed == Client::STATE_UNMOUNTING ||
-            needed == Client::STATE_MOUNTING ||
-            needed == Client::STATE_MOUNTED)
+        if (state == Client::STATE_UNMOUNTING ||
+            state == Client::STATE_MOUNTING ||
+            state == Client::STATE_MOUNTED)
           c->unmounting_refcnt++;
 
-        if (needed == Client::STATE_NEW ||
-            needed == Client::STATE_INITIALIZED)
+        if (state == Client::STATE_NEW ||
+            state == Client::STATE_INITIALIZED)
           c->shutdown_refcnt++;
       }
+
+      type = state;
     }
 
-    type = needed;
     client = c;
   }
 
