@@ -301,7 +301,8 @@ Client::Client(Messenger *m, MonClient *mc, Objecter *objecter_)
   // osd interfaces
   writeback_handler.reset(new ObjecterWriteback(objecter, &objecter_finisher,
 					    &client_lock));
-  objectcacher.reset(new ObjectCacher(cct, "libcephfs", *writeback_handler, client_lock,
+  objectcacher.reset(new ObjectCacher(cct, "libcephfs", *writeback_handler,
+				  objectcacher_lock,
 				  client_flush_set_callback,    // all commit callback
 				  (void*)this,
 				  cct->_conf->client_oc_size,
@@ -2479,7 +2480,9 @@ void Client::_handle_full_flag(int64_t pool)
         && (pool == -1 || inode->layout.pool_id == pool)) {
       ldout(cct, 4) << __func__ << ": FULL: inode 0x" << std::hex << i->first << std::dec
         << " has dirty objects, purging and setting ENOSPC" << dendl;
+      objectcacher_lock.lock();
       objectcacher->purge_set(&inode->oset);
+      objectcacher_lock.unlock();
       inode->set_async_err(-ENOSPC);
     }
   }
@@ -3055,7 +3058,9 @@ void Client::put_inode(Inode *in, int n)
     remove_all_caps(in);
 
     ldout(cct, 10) << __func__ << " deleting " << *in << dendl;
+    objectcacher_lock.lock();
     bool unclean = objectcacher->release_set(&in->oset);
+    objectcacher_lock.unlock();
     ceph_assert(!unclean);
     inode_map.erase(in->vino());
     if (use_faked_inos())
@@ -3341,6 +3346,7 @@ int Client::get_caps(Fh *fh, int need, int want, int *phave, loff_t endoff)
 int Client::get_caps_used(Inode *in)
 {
   unsigned used = in->caps_used();
+  std::lock_guard l(objectcacher_lock);
   if (!(used & CEPH_CAP_FILE_CACHE) &&
       !objectcacher->set_is_empty(&in->oset))
     used |= CEPH_CAP_FILE_CACHE;
@@ -3923,9 +3929,11 @@ void Client::_invalidate_inode_cache(Inode *in)
 
   // invalidate our userspace inode cache
   if (cct->_conf->client_oc) {
+    objectcacher_lock.lock();
     objectcacher->release_set(&in->oset);
     if (!objectcacher->set_is_empty(&in->oset))
       lderr(cct) << "failed to invalidate cache for " << *in << dendl;
+    objectcacher_lock.unlock();
   }
 
   _schedule_invalidate_callback(in, 0, 0);
@@ -3939,7 +3947,9 @@ void Client::_invalidate_inode_cache(Inode *in, int64_t off, int64_t len)
   if (cct->_conf->client_oc) {
     vector<ObjectExtent> ls;
     Striper::file_to_extents(cct, in->ino, &in->layout, off, len, in->truncate_size, ls);
+    objectcacher_lock.lock();
     objectcacher->discard_writeback(&in->oset, ls, nullptr);
+    objectcacher_lock.unlock();
   }
 
   _schedule_invalidate_callback(in, off, len);
@@ -3967,13 +3977,16 @@ bool Client::_flush(Inode *in, Context *onfinish)
 
   if (objecter->osdmap_pool_full(in->layout.pool_id)) {
     ldout(cct, 8) << __func__ << ": FULL, purging for ENOSPC" << dendl;
+    objectcacher_lock.lock();
     objectcacher->purge_set(&in->oset);
+    objectcacher_lock.unlock();
     if (onfinish) {
       onfinish->complete(-ENOSPC);
     }
     return true;
   }
 
+  std::lock_guard l(objectcacher_lock);
   return objectcacher->flush_set(&in->oset, onfinish);
 }
 
@@ -3986,8 +3999,10 @@ void Client::_flush_range(Inode *in, int64_t offset, uint64_t size)
   }
 
   C_SaferCond onflush("Client::_flush_range flock");
+  objectcacher_lock.lock();
   bool ret = objectcacher->file_flush(&in->oset, &in->layout, in->snaprealm->get_snap_context(),
 				      offset, size, &onflush);
+  objectcacher_lock.unlock();
   if (!ret) {
     // wait for flush
     client_lock.unlock();
@@ -4208,9 +4223,13 @@ void Client::remove_session_caps(MetaSession *s, int err)
 	  lderr(cct) << __func__ << " still has dirty data on " << *in << dendl;
 	  in->set_async_err(err);
 	}
+        objectcacher_lock.lock();
 	objectcacher->purge_set(&in->oset);
+        objectcacher_lock.unlock();
       } else {
+        objectcacher_lock.lock();
 	objectcacher->release_set(&in->oset);
+        objectcacher_lock.unlock();
       }
       _schedule_invalidate_callback(in.get(), 0, 0);
     }
@@ -6228,7 +6247,9 @@ void Client::_unmount(bool abort)
       anchor.emplace_back(in);
 
       if (abort || blacklisted) {
+        objectcacher_lock.lock();
         objectcacher->purge_set(&in->oset);
+        objectcacher_lock.unlock();
       } else if (!in->caps.empty()) {
 	_release(in);
 	_flush(in, new C_Client_FlushComplete(this, in));
@@ -9414,8 +9435,10 @@ int Client::_read_async(Fh *f, uint64_t off, uint64_t len, bufferlist *bl)
   // read (and possibly block)
   int r = 0;
   C_SaferCond onfinish("Client::_read_async flock");
+  objectcacher_lock.lock();
   r = objectcacher->file_read(&in->oset, &in->layout, in->snapid,
 			      off, len, bl, 0, &onfinish);
+  objectcacher_lock.unlock();
   if (r == 0) {
     get_cap_ref(in, CEPH_CAP_FILE_CACHE);
     client_lock.unlock();
@@ -9430,9 +9453,11 @@ int Client::_read_async(Fh *f, uint64_t off, uint64_t len, bufferlist *bl)
       ldout(cct, 20) << "readahead " << readahead_extent.first << "~" << readahead_extent.second
 		     << " (caller wants " << off << "~" << len << ")" << dendl;
       Context *onfinish2 = new C_Readahead(this, f);
+      objectcacher_lock.lock();
       int r2 = objectcacher->file_read(&in->oset, &in->layout, in->snapid,
 				       readahead_extent.first, readahead_extent.second,
 				       NULL, 0, onfinish2);
+      objectcacher_lock.unlock();
       if (r2 == 0) {
 	ldout(cct, 20) << "readahead initiated, c " << onfinish2 << dendl;
 	get_cap_ref(in, CEPH_CAP_FILE_RD | CEPH_CAP_FILE_CACHE);
@@ -9760,10 +9785,12 @@ int64_t Client::_write(Fh *f, int64_t offset, uint64_t size, const char *buf,
     get_cap_ref(in, CEPH_CAP_FILE_BUFFER);
 
     // async, caching, non-blocking.
+    objectcacher_lock.lock();
     r = objectcacher->file_write(&in->oset, &in->layout,
 				 in->snaprealm->get_snap_context(),
 				 offset, size, bl, ceph::real_clock::now(),
 				 0);
+    objectcacher_lock.unlock();
     put_cap_ref(in, CEPH_CAP_FILE_BUFFER);
 
     if (r < 0)
@@ -10617,7 +10644,9 @@ int Client::_sync_fs()
   std::unique_ptr<C_SaferCond> cond = nullptr; 
   if (cct->_conf->client_oc) {
     cond.reset(new C_SaferCond("Client::_sync_fs:lock"));
+    objectcacher_lock.lock();
     objectcacher->flush_all(cond.get());
+    objectcacher_lock.unlock();
   }
 
   // flush caps

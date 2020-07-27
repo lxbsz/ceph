@@ -962,7 +962,10 @@ protected:
   InodeRef cwd;
 
   std::unique_ptr<Filer>             filer;
+
+  ceph::mutex objectcacher_lock = ceph::make_mutex("Client::objectcacher_lock");
   std::unique_ptr<ObjectCacher>      objectcacher;
+
   std::unique_ptr<WritebackHandler>  writeback_handler;
 
   Messenger *messenger;
