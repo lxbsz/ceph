@@ -11,10 +11,12 @@
 #include "mds/mdstypes.h"
 #include "InodeRef.h"
 #include "UserPerm.h"
+#include "MetaRequestRef.h"
 
 #include "messages/MClientRequest.h"
 #include "messages/MClientReply.h"
 
+class Client;
 class Dentry;
 class dir_result_t;
 
@@ -25,6 +27,10 @@ private:
   Dentry *_old_dentry; //associated with path2
   int abort_rc;
 public:
+  ceph::mutex request_lock = ceph::make_mutex("MetaRequest::request_lock");
+
+  Client *client;
+
   uint64_t tid;
   utime_t  op_stamp;
   ceph_mds_request_head head;
@@ -71,9 +77,9 @@ public:
   InodeRef target;
   UserPerm perms;
 
-  explicit MetaRequest(int op) :
+  explicit MetaRequest(Client *c, int op) :
     _dentry(NULL), _old_dentry(NULL), abort_rc(0),
-    tid(0),
+    client(c), tid(0),
     inode_drop(0), inode_unless(0),
     old_inode_drop(0), old_inode_unless(0),
     dentry_drop(0), dentry_unless(0),

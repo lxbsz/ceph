@@ -39,6 +39,7 @@
 #include "InodeRef.h"
 #include "MetaSession.h"
 #include "UserPerm.h"
+#include "MetaRequestRef.h"
 
 #include <fstream>
 #include <map>
@@ -236,6 +237,7 @@ public:
   friend class SyntheticClient;
   friend void intrusive_ptr_release(Inode *in);
   friend void intrusive_ptr_release(MetaSession *s);
+  friend void intrusive_ptr_release(MetaRequest *request);
 
   using Dispatcher::cct;
 
@@ -707,8 +709,8 @@ public:
   void update_dir_dist(Inode *in, DirStat *st);
 
   void clear_dir_complete_and_ordered(Inode *diri, bool complete);
-  void insert_readdir_results(MetaRequest *request, MetaSessionRef &session, Inode *diri);
-  Inode* insert_trace(MetaRequest *request, MetaSessionRef &session);
+  void insert_readdir_results(MetaRequestRef &request, MetaSessionRef &session, Inode *diri);
+  Inode* insert_trace(MetaRequestRef &request, MetaSessionRef &session);
   void update_inode_file_size(Inode *in, int issued, uint64_t size,
 			      uint64_t truncate_seq, uint64_t truncate_size);
   void update_inode_file_time(Inode *in, int issued, uint64_t time_warp_seq,
@@ -788,28 +790,28 @@ protected:
 		   InodeRef *ptarget = 0, bool *pcreated = 0,
 		   mds_rank_t use_mds=-1, bufferlist *pdirbl=0);
   void put_request(MetaRequest *request);
-  void unregister_request(MetaRequest *request);
+  void unregister_request(MetaRequestRef &request);
 
   int verify_reply_trace(int r, MetaSessionRef &session, MetaRequest *request,
 			 const MConstRef<MClientReply>& reply,
 			 InodeRef *ptarget, bool *pcreated,
 			 const UserPerm& perms);
-  void encode_cap_releases(MetaRequest *request, mds_rank_t mds);
-  int encode_inode_release(Inode *in, MetaRequest *req,
+  void encode_cap_releases(MetaRequestRef &request, mds_rank_t mds);
+  int encode_inode_release(Inode *in, MetaRequestRef &req,
 			   mds_rank_t mds, int drop,
 			   int unless,int force=0);
-  void encode_dentry_release(Dentry *dn, MetaRequest *req,
+  void encode_dentry_release(Dentry *dn, MetaRequestRef &req,
 			     mds_rank_t mds, int drop, int unless);
-  mds_rank_t choose_target_mds(MetaRequest *req, Inode** phash_diri=NULL);
+  mds_rank_t choose_target_mds(MetaRequestRef &req, Inode** phash_diri=NULL);
   void connect_mds_targets(mds_rank_t mds);
-  void send_request(MetaRequest *request, MetaSessionRef &session,
+  void send_request(MetaRequestRef &request, MetaSessionRef &session,
 		    bool drop_cap_releases=false);
-  MRef<MClientRequest> build_client_request(MetaRequest *request);
+  MRef<MClientRequest> build_client_request(MetaRequestRef &request);
   void kick_requests(MetaSessionRef &session);
   void kick_requests_closed(MetaSessionRef &session);
   void handle_client_request_forward(const MConstRef<MClientRequestForward>& reply);
   void handle_client_reply(const MConstRef<MClientReply>& reply);
-  bool is_dir_operation(MetaRequest *request);
+  bool is_dir_operation(MetaRequestRef &request);
 
   // fake inode number for 32-bits ino_t
   void _assign_faked_ino(Inode *in);

@@ -70,14 +70,9 @@ struct MetaSession {
       mds_state(MDSMap::STATE_NULL), readonly(false)
   {}
 
-  MetaSession *get() { _ref++; return this; }
-
+  void get() { _ref++; }
   /* Private method to put a reference; see Client::put_session() */
   int _put() { ceph_assert(--_ref >= 0); return _ref; }
-
-  int get_num_ref() {
-    return _ref;
-  }
 
   const char *get_state_name() const;
 
