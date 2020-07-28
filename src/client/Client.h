@@ -1248,6 +1248,11 @@ private:
   bool   unmounting = false;
   bool   blacklisted = false;
 
+  /*
+   * Separate lock for "inode_map", "faked_ino_map", "free_faked_inos",
+   * "last_used_faked_ino", and "last_used_faked_root"
+   */
+  ceph::mutex inode_map_lock = ceph::make_mutex("Client::inode_map_lock");
   ceph::unordered_map<vinodeno_t, Inode*> inode_map;
   ceph::unordered_map<ino_t, vinodeno_t> faked_ino_map;
   interval_set<ino_t> free_faked_inos;

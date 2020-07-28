@@ -122,6 +122,13 @@ struct Inode {
   // -- the actual inode --
   inodeno_t ino; // ORDER DEPENDENCY: oset
   snapid_t  snapid;
+
+  /*
+   * Since the "ino" and "snapid" won't be changed once they are
+   * initialized, so there is no need the inode_lock for them.
+   */
+  ceph::mutex inode_lock = ceph::make_mutex("Client::inode_lock");
+
   ino_t faked_ino;
 
   uint32_t   rdev;    // if special file
