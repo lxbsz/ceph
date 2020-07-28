@@ -1085,16 +1085,20 @@ void Client::clear_dir_complete_and_ordered(Inode *diri, bool complete)
 /*
  * insert results from readdir or lssnap into the metadata cache.
  */
-void Client::insert_readdir_results(MetaRequest *request, MetaSessionRef &session, Inode *diri) {
+void Client::insert_readdir_results(MetaRequestRef &request, MetaSessionRef &session, Inode *diri) {
+  ceph_assert(!ceph_mutex_is_locked_by_me(client_lock));
 
   auto& reply = request->reply;
   ConnectionRef con = request->reply->get_connection();
   uint64_t features;
-  if(session->mds_features.test(CEPHFS_FEATURE_REPLY_ENCODING)) {
-    features = (uint64_t)-1;
-  }
-  else {
-    features = con->get_features();
+
+  {
+    std::lock_guard l(client_lock);
+    if(session->mds_features.test(CEPHFS_FEATURE_REPLY_ENCODING)) {
+      features = (uint64_t)-1;
+    } else {
+      features = con->get_features();
+    }
   }
 
   dir_result_t *dirp = request->dirp;
@@ -1104,6 +1108,7 @@ void Client::insert_readdir_results(MetaRequest *request, MetaSessionRef &sessio
   auto p = reply->get_extra_bl().cbegin();
   if (!p.end()) {
     // snapdir?
+    client_lock.lock();
     if (request->head.op == CEPH_MDS_OP_LSSNAP) {
       ceph_assert(diri);
       diri = open_snapdir(diri);
@@ -1111,6 +1116,7 @@ void Client::insert_readdir_results(MetaRequest *request, MetaSessionRef &sessio
 
     // only open dir if we're actually adding stuff to it!
     Dir *dir = diri->open_dir();
+    client_lock.unlock();
     ceph_assert(dir);
 
     // dirstat
@@ -1131,6 +1137,7 @@ void Client::insert_readdir_results(MetaRequest *request, MetaSessionRef &sessio
     unsigned last_hash = 0;
     if (hash_order) {
       if (!readdir_start.empty()) {
+        std::lock_guard l(client_lock);
 	last_hash = ceph_frag_value(diri->hash_dentry_name(readdir_start));
       } else if (flags & CEPH_READDIR_OFFSET_HASH) {
 	/* mds understands offset_hash */
@@ -1154,6 +1161,7 @@ void Client::insert_readdir_results(MetaRequest *request, MetaSessionRef &sessio
 		   << ", last_hash " << last_hash
 		   << ", next_offset " << readdir_offset << dendl;
 
+    client_lock.lock();
     if (diri->snapid != CEPH_SNAPDIR &&
 	fg.is_leftmost() && readdir_offset == 2 &&
 	!(hash_order && last_hash)) {
@@ -1162,6 +1170,7 @@ void Client::insert_readdir_results(MetaRequest *request, MetaSessionRef &sessio
       dirp->start_shared_gen = diri->shared_gen;
       dirp->cache_index = 0;
     }
+    client_lock.unlock();
 
     dirp->buffer_frag = fg;
 
@@ -1170,6 +1179,7 @@ void Client::insert_readdir_results(MetaRequest *request, MetaSessionRef &sessio
 
     string dname;
     LeaseStat dlease;
+
     for (unsigned i=0; i<numdn; i++) {
       decode(dname, p);
       dlease.decode(p, features);
@@ -1177,6 +1187,7 @@ void Client::insert_readdir_results(MetaRequest *request, MetaSessionRef &sessio
 
       ldout(cct, 15) << "" << i << ": '" << dname << "'" << dendl;
 
+      std::lock_guard l(client_lock);
       Inode *in = add_update_inode(&ist, request->sent_stamp, session,
 				   request->perms);
       Dentry *dn;
@@ -1239,6 +1250,7 @@ void Client::insert_readdir_results(MetaRequest *request, MetaSessionRef &sessio
     else
       dirp->next_offset = readdir_offset;
 
+    std::lock_guard l(client_lock);
     if (dir->is_empty())
       close_dir(dir);
   }
@@ -1248,8 +1260,10 @@ void Client::insert_readdir_results(MetaRequest *request, MetaSessionRef &sessio
  *
  * insert a trace from a MDS reply into the cache.
  */
-Inode* Client::insert_trace(MetaRequest *request, MetaSessionRef &session)
+Inode* Client::insert_trace(MetaRequestRef &request, MetaSessionRef &session)
 {
+  ceph_assert(!ceph_mutex_is_locked_by_me(client_lock));
+
   auto& reply = request->reply;
   int op = request->get_op();
 
@@ -1267,6 +1281,8 @@ Inode* Client::insert_trace(MetaRequest *request, MetaSessionRef &session)
 
   if (p.end()) {
     ldout(cct, 10) << "insert_trace -- no trace" << dendl;
+
+    std::lock_guard l(client_lock);
 
     Dentry *d = request->dentry();
     if (d) {
@@ -1294,11 +1310,13 @@ Inode* Client::insert_trace(MetaRequest *request, MetaSessionRef &session)
 
   ConnectionRef con = request->reply->get_connection();
   uint64_t features;
-  if (session->mds_features.test(CEPHFS_FEATURE_REPLY_ENCODING)) {
-    features = (uint64_t)-1;
-  }
-  else {
-    features = con->get_features();
+  {
+    std::lock_guard l(client_lock);
+    if (session->mds_features.test(CEPHFS_FEATURE_REPLY_ENCODING)) {
+      features = (uint64_t)-1;
+    } else {
+      features = con->get_features();
+    }
   }
   ldout(cct, 10) << " features 0x" << hex << features << dec << dendl;
 
@@ -1340,12 +1358,14 @@ Inode* Client::insert_trace(MetaRequest *request, MetaSessionRef &session)
 	ceph_abort_msg("MDS reply does not contain xattrs");
     }
 
+    std::lock_guard l(client_lock);
     in = add_update_inode(&ist, request->sent_stamp, session,
 			  request->perms);
   }
 
   Inode *diri = NULL;
   if (reply->head.is_dentry) {
+    std::lock_guard l(client_lock);
     diri = add_update_inode(&dirst, request->sent_stamp, session,
 			    request->perms);
     update_dir_dist(diri, &dst);  // dir stat info is attached to ..
@@ -1378,11 +1398,14 @@ Inode* Client::insert_trace(MetaRequest *request, MetaSessionRef &session)
     // fake it for snap lookup
     vinodeno_t vino = ist.vino;
     vino.snapid = CEPH_SNAPDIR;
+
+    std::lock_guard l(client_lock);
+
     ceph_assert(inode_map.count(vino));
     diri = inode_map[vino];
-    
+
     string dname = request->path.last_dentry();
-    
+
     LeaseStat dlease;
     dlease.duration_ms = 0;
 
@@ -1422,7 +1445,7 @@ Inode* Client::insert_trace(MetaRequest *request, MetaSessionRef &session)
 
 // -------
 
-mds_rank_t Client::choose_target_mds(MetaRequest *req, Inode** phash_diri)
+mds_rank_t Client::choose_target_mds(MetaRequestRef &req, Inode** phash_diri)
 {
   mds_rank_t mds = MDS_RANK_NONE;
   __u32 hash = 0;
@@ -1579,13 +1602,24 @@ void Client::dump_mds_sessions(Formatter *f)
 }
 void Client::dump_mds_requests(Formatter *f)
 {
+  std::unique_lock cl{client_lock, std::adopt_lock};
+
   for (map<ceph_tid_t, MetaRequest*>::iterator p = mds_requests.begin();
        p != mds_requests.end();
        ++p) {
     f->open_object_section("request");
-    p->second->dump(f);
+    MetaRequestRef request = p->second;
+
+    cl.unlock();
+    {
+      std::lock_guard rl{request->request_lock};
+      request->dump(f);
+    }
+    cl.lock();
     f->close_section();
   }
+
+  cl.release();
 }
 
 int Client::verify_reply_trace(int r, MetaSessionRef &session,
@@ -1701,19 +1735,28 @@ int Client::make_request(MetaRequest *request,
 {
   int r = 0;
 
+  std::unique_lock cl{client_lock, std::adopt_lock};
+
   // assign a unique tid
   ceph_tid_t tid = ++last_tid;
+
+  MetaRequestRef tmp_request(request);
+  cl.unlock();
+  std::unique_lock rl{request->request_lock};
+
   request->set_tid(tid);
+  request->op_stamp = ceph_clock_now(); // and timestamp
+  request->set_caller_perms(perms);
 
-  // and timestamp
-  request->op_stamp = ceph_clock_now();
+  // hack target mds?
+  if (use_mds >= 0)
+    request->resend_mds = use_mds;
 
+  cl.lock();
   // make note
   mds_requests[tid] = request->get();
   if (oldest_tid == 0 && request->get_op() != CEPH_MDS_OP_SETFILELOCK)
     oldest_tid = tid;
-
-  request->set_caller_perms(perms);
 
   if (cct->_conf->client_inject_fixed_oldest_tid) {
     ldout(cct, 20) << __func__ << " injecting fixed oldest_client_tid(1)" << dendl;
@@ -1721,10 +1764,6 @@ int Client::make_request(MetaRequest *request,
   } else {
     request->set_oldest_client_tid(oldest_tid);
   }
-
-  // hack target mds?
-  if (use_mds >= 0)
-    request->resend_mds = use_mds;
 
   MetaSessionRef session = NULL;
   while (1) {
@@ -1742,7 +1781,7 @@ int Client::make_request(MetaRequest *request,
 
     // choose mds
     Inode *hash_diri = NULL;
-    mds_rank_t mds = choose_target_mds(request, &hash_diri);
+    mds_rank_t mds = choose_target_mds(tmp_request, &hash_diri);
     int mds_state = (mds == MDS_RANK_NONE) ? MDSMap::STATE_NULL : mdsmap->get_state(mds);
     if (mds_state != MDSMap::STATE_ACTIVE && mds_state != MDSMap::STATE_STOPPING) {
       if (mds_state == MDSMap::STATE_NULL && mds >= mdsmap->get_max_mds()) {
@@ -1781,19 +1820,20 @@ int Client::make_request(MetaRequest *request,
     }
 
     // send request.
-    send_request(request, session);
+    send_request(tmp_request, session);
 
     // wait for signal
     ldout(cct, 20) << "awaiting reply|forward|kick on " << &caller_cond << dendl;
     request->kick = false;
-    std::unique_lock l{client_lock, std::adopt_lock};
-    caller_cond.wait(l, [request] {
+
+    cl.unlock();
+    caller_cond.wait(rl, [request] {
       return (request->reply ||	          // reply
 	      request->resend_mds >= 0 || // forward
 	      request->kick);
     });
-    l.release();
     request->caller_cond = nullptr;
+    cl.lock();
 
     // did we get a reply?
     if (request->reply) 
@@ -1805,10 +1845,13 @@ int Client::make_request(MetaRequest *request,
     ceph_assert(!request->got_unsafe);
     r = request->get_abort_code();
     request->item.remove_myself();
-    unregister_request(request);
+    unregister_request(tmp_request);
     put_request(request);
+    cl.release();
     return r;
   }
+
+  cl.unlock();
 
   // got it!
   auto reply = std::move(request->reply);
@@ -1821,7 +1864,9 @@ int Client::make_request(MetaRequest *request,
   request->dispatch_cond->notify_all();
   ldout(cct, 20) << "sendrecv kickback on tid " << tid << " " << request->dispatch_cond << dendl;
   request->dispatch_cond = 0;
-  
+
+  cl.lock();
+
   if (r >= 0 && ptarget)
     r = verify_reply_trace(r, session, request, reply, ptarget, pcreated, perms);
 
@@ -1836,10 +1881,12 @@ int Client::make_request(MetaRequest *request,
   logger->tinc(l_c_reply, lat);
 
   put_request(request);
+
+  cl.release();
   return r;
 }
 
-void Client::unregister_request(MetaRequest *req)
+void Client::unregister_request(MetaRequestRef &req)
 {
   mds_requests.erase(req->tid);
   if (req->tid == oldest_tid) {
@@ -1856,7 +1903,7 @@ void Client::unregister_request(MetaRequest *req)
       ++p;
     }
   }
-  put_request(req);
+  put_request(req.get());
 }
 
 void Client::put_request(MetaRequest *request)
@@ -1878,7 +1925,7 @@ void Client::put_request(MetaRequest *request)
   }
 }
 
-int Client::encode_inode_release(Inode *in, MetaRequest *req,
+int Client::encode_inode_release(Inode *in, MetaRequestRef &req,
 			 mds_rank_t mds, int drop,
 			 int unless, int force)
 {
@@ -1924,7 +1971,7 @@ int Client::encode_inode_release(Inode *in, MetaRequest *req,
   return released;
 }
 
-void Client::encode_dentry_release(Dentry *dn, MetaRequest *req,
+void Client::encode_dentry_release(Dentry *dn, MetaRequestRef &req,
 			   mds_rank_t mds, int drop, int unless)
 {
   ldout(cct, 20) << __func__ << " enter(dn:"
@@ -1951,7 +1998,7 @@ void Client::encode_dentry_release(Dentry *dn, MetaRequest *req,
  * Additionally, if you set any *drop member, you'd better have
  * set the corresponding dentry!
  */
-void Client::encode_cap_releases(MetaRequest *req, mds_rank_t mds)
+void Client::encode_cap_releases(MetaRequestRef &req, mds_rank_t mds)
 {
   ldout(cct, 20) << __func__ << " enter (req: "
 		 << req << ", mds: " << mds << ")" << dendl;
@@ -2235,7 +2282,7 @@ void Client::_kick_stale_sessions()
   }
 }
 
-void Client::send_request(MetaRequest *request, MetaSessionRef &session,
+void Client::send_request(MetaRequestRef &request, MetaSessionRef &session,
 			  bool drop_cap_releases)
 {
   // make the request
@@ -2284,7 +2331,7 @@ void Client::send_request(MetaRequest *request, MetaSessionRef &session,
   session->con->send_message2(std::move(r));
 }
 
-ref_t<MClientRequest> Client::build_client_request(MetaRequest *request)
+ref_t<MClientRequest> Client::build_client_request(MetaRequestRef &request)
 {
   auto req = make_message<MClientRequest>(request->get_op());
   req->set_tid(request->tid);
@@ -2326,6 +2373,8 @@ ref_t<MClientRequest> Client::build_client_request(MetaRequest *request)
 
 void Client::handle_client_request_forward(const MConstRef<MClientRequestForward>& fwd)
 {
+  std::unique_lock cl{client_lock, std::adopt_lock};
+
   mds_rank_t mds = mds_rank_t(fwd->get_source().num());
   MetaSessionRef session = _get_mds_session(mds, fwd->get_connection().get());
   if (!session) {
@@ -2338,7 +2387,10 @@ void Client::handle_client_request_forward(const MConstRef<MClientRequestForward
     return;
   }
 
-  MetaRequest *request = mds_requests[tid];
+  MetaRequestRef request = mds_requests[tid];
+  cl.unlock();
+  std::unique_lock rl{request->request_lock};
+
   ceph_assert(request);
 
   // reset retry counter
@@ -2351,15 +2403,19 @@ void Client::handle_client_request_forward(const MConstRef<MClientRequestForward
 	   << " to mds." << fwd->get_dest_mds() 
 	   << ", resending to " << fwd->get_dest_mds()
 	   << dendl;
-  
+
   request->mds = -1;
-  request->item.remove_myself();
   request->num_fwd = fwd->get_num_fwd();
   request->resend_mds = fwd->get_dest_mds();
   request->caller_cond->notify_all();
+
+  cl.lock();
+  request->item.remove_myself();
+
+  cl.release();
 }
 
-bool Client::is_dir_operation(MetaRequest *req)
+bool Client::is_dir_operation(MetaRequestRef &req)
 {
   int op = req->get_op();
   if (op == CEPH_MDS_OP_MKNOD || op == CEPH_MDS_OP_LINK ||
@@ -2372,6 +2428,8 @@ bool Client::is_dir_operation(MetaRequest *req)
 
 void Client::handle_client_reply(const MConstRef<MClientReply>& reply)
 {
+  std::unique_lock cl{client_lock, std::adopt_lock};
+
   mds_rank_t mds_num = mds_rank_t(reply->get_source().num());
   MetaSessionRef session = _get_mds_session(mds_num, reply->get_connection().get());
   if (!session) {
@@ -2386,7 +2444,10 @@ void Client::handle_client_reply(const MConstRef<MClientReply>& reply)
 	       << " safe is:" << is_safe << dendl;
     return;
   }
-  MetaRequest *request = mds_requests.at(tid);
+  MetaRequestRef request = mds_requests.at(tid);
+
+  cl.unlock();
+  std::unique_lock rl{request->request_lock};
 
   ldout(cct, 20) << __func__ << " got a reply. Safe:" << is_safe
 		 << " tid " << tid << dendl;
@@ -2405,6 +2466,8 @@ void Client::handle_client_reply(const MConstRef<MClientReply>& reply)
     request->resend_mds = choose_target_mds(request);
     Inode *in = request->inode();
     std::map<mds_rank_t, Cap>::const_iterator it;
+
+    std::lock_guard l(client_lock);
     if (request->resend_mds >= 0 &&
 	request->resend_mds == request->mds &&
 	(in == NULL ||
@@ -2424,6 +2487,8 @@ void Client::handle_client_reply(const MConstRef<MClientReply>& reply)
   // Handle unsafe reply
   if (!is_safe) {
     request->got_unsafe = true;
+
+    std::lock_guard l(client_lock);
     session->unsafe_requests.push_back(&request->unsafe_item);
     if (is_dir_operation(request)) {
       Inode *dir = request->inode();
@@ -2446,16 +2511,16 @@ void Client::handle_client_reply(const MConstRef<MClientReply>& reply)
     ldout(cct, 20) << __func__ << " signalling caller " << (void*)request->caller_cond << dendl;
     request->caller_cond->notify_all();
 
+    ceph_assert(!ceph_mutex_is_locked_by_me(client_lock));
+
     // wake for kick back
-    std::unique_lock l{client_lock, std::adopt_lock};
-    cond.wait(l, [tid, request, &cond, this] {
+    cond.wait(rl, [tid, request, &cond, this] {
       if (request->dispatch_cond) {
         ldout(cct, 20) << "handle_client_reply awaiting kickback on tid "
 		       << tid << " " << &cond << dendl;
       }
       return !request->dispatch_cond;
     });
-    l.release();
   }
 
   if (is_safe) {
@@ -2467,11 +2532,18 @@ void Client::handle_client_reply(const MConstRef<MClientReply>& reply)
       request->unsafe_target_item.remove_myself();
       signal_cond_list(request->waitfor_safe);
     }
+  }
+
+  cl.lock();
+  if (is_safe) {
     request->item.remove_myself();
     unregister_request(request);
   }
+
   if (unmounting)
     mount_cond.notify_all();
+
+  cl.release();
 }
 
 void Client::_handle_full_flag(int64_t pool)
@@ -2911,50 +2983,80 @@ void Client::send_reconnect(MetaSessionRef &session)
 
 void Client::kick_requests(MetaSessionRef &session)
 {
+  std::unique_lock cl{client_lock, std::adopt_lock};
+
   ldout(cct, 10) << __func__ << " for mds." << session->mds_num << dendl;
   for (map<ceph_tid_t, MetaRequest*>::iterator p = mds_requests.begin();
        p != mds_requests.end();
        ++p) {
-    MetaRequest *req = p->second;
-    if (req->got_unsafe)
+    MetaRequestRef req = p->second;
+    cl.unlock();
+    std::lock_guard rl{req->request_lock};
+
+    if (req->got_unsafe) {
+      cl.lock();
       continue;
+    }
+
     if (req->aborted()) {
       if (req->caller_cond) {
 	req->kick = true;
 	req->caller_cond->notify_all();
       }
+      cl.lock();
       continue;
     }
-    if (req->retry_attempt > 0)
+    if (req->retry_attempt > 0) {
+      cl.lock();
       continue; // new requests only
+    }
+
+    cl.lock();
     if (req->mds == session->mds_num) {
-      send_request(p->second, session);
+      send_request(req, session);
     }
   }
+  cl.release();
 }
 
 void Client::resend_unsafe_requests(MetaSessionRef &session)
 {
+  std::unique_lock cl{client_lock, std::adopt_lock};
+
   for (xlist<MetaRequest*>::iterator iter = session->unsafe_requests.begin();
        !iter.end();
-       ++iter)
-    send_request(*iter, session);
+       ++iter) {
+    MetaRequestRef req(*iter);
+    send_request(req, session);
+  }
 
   // also re-send old requests when MDS enters reconnect stage. So that MDS can
   // process completed requests in clientreplay stage.
   for (map<ceph_tid_t, MetaRequest*>::iterator p = mds_requests.begin();
        p != mds_requests.end();
        ++p) {
-    MetaRequest *req = p->second;
-    if (req->got_unsafe)
+    MetaRequestRef req = p->second;
+    cl.unlock();
+    std::lock_guard rl{req->request_lock};
+
+    if (req->got_unsafe) {
+      cl.lock();
       continue;
-    if (req->aborted())
+    }
+    if (req->aborted()) {
+      cl.lock();
       continue;
-    if (req->retry_attempt == 0)
+    }
+    if (req->retry_attempt == 0) {
+      cl.lock();
       continue; // old requests only
+    }
+
+    cl.lock();
     if (req->mds == session->mds_num)
       send_request(req, session, true);
   }
+  cl.release();
 }
 
 void Client::wait_unsafe_requests()
@@ -2981,11 +3083,18 @@ void Client::wait_unsafe_requests()
 
 void Client::kick_requests_closed(MetaSessionRef &session)
 {
+  std::unique_lock cl{client_lock, std::adopt_lock};
+
   ldout(cct, 10) << __func__ << " for mds." << session->mds_num << dendl;
   for (map<ceph_tid_t, MetaRequest*>::iterator p = mds_requests.begin();
        p != mds_requests.end(); ) {
-    MetaRequest *req = p->second;
+    MetaRequestRef req = p->second;
     ++p;
+
+    cl.unlock();
+    std::lock_guard rl{req->request_lock};
+    cl.lock();
+
     if (req->mds == session->mds_num) {
       if (req->caller_cond) {
 	req->kick = true;
@@ -3017,6 +3126,8 @@ void Client::kick_requests_closed(MetaSessionRef &session)
   }
   ceph_assert(session->requests.empty());
   ceph_assert(session->unsafe_requests.empty());
+
+  cl.release();
 }
 
 
@@ -6045,7 +6156,7 @@ int Client::mount(const std::string &mount_root, const UserPerm& perms,
     fp = filepath(mount_root.c_str());
   }
   while (true) {
-    MetaRequest *req = new MetaRequest(CEPH_MDS_OP_GETATTR);
+    MetaRequest *req = new MetaRequest(this, CEPH_MDS_OP_GETATTR);
     req->set_filepath(fp);
     req->head.args.getattr.mask = CEPH_STAT_CAP_INODE_ALL;
     int res = make_request(req, perms);
@@ -6156,19 +6267,28 @@ void Client::flush_mdlog(MetaSessionRef &session)
 
 void Client::_abort_mds_sessions(int err)
 {
+  std::unique_lock cl{client_lock, std::adopt_lock};
+
   for (auto p = mds_requests.begin(); p != mds_requests.end(); ) {
     auto req = p->second;
     ++p;
     // unsafe requests will be removed during close session below.
-    if (req->got_unsafe)
+    cl.unlock();
+    std::lock_guard rl{req->request_lock};
+
+    if (req->got_unsafe) {
+      cl.lock();
       continue;
+    }
 
     req->abort(err);
     if (req->caller_cond) {
       req->kick = true;
       req->caller_cond->notify_all();
     }
+    cl.lock();
   }
+
 
   // Process aborts on any requests that were on this waitlist.
   // Any requests that were on a waiting_for_open session waitlist
@@ -6180,6 +6300,8 @@ void Client::_abort_mds_sessions(int err)
     MetaSessionRef session = &mds_sessions.begin()->second;
     _closed_mds_session(session, err);
   }
+
+  cl.release();
 }
 
 void Client::_unmount(bool abort)
@@ -6371,21 +6493,27 @@ void Client::tick()
 
   utime_t now = ceph_clock_now();
 
-  std::lock_guard lock(client_lock);
+  std::unique_lock cl(client_lock);
 
   if (!mounted && !mds_requests.empty()) {
-    MetaRequest *req = mds_requests.begin()->second;
+    MetaRequestRef req = mds_requests.begin()->second;
+    cl.unlock();
+    std::lock_guard rl{req->request_lock};
+
     if (req->op_stamp + cct->_conf->client_mount_timeout < now) {
       req->abort(-ETIMEDOUT);
       if (req->caller_cond) {
 	req->kick = true;
 	req->caller_cond->notify_all();
       }
+      cl.lock();
       signal_cond_list(waiting_for_mdsmap);
       for (auto &p : mds_sessions) {
 	signal_context_list(p.second.waiting_for_open);
       }
+      cl.unlock();
     }
+    cl.lock();
   }
 
   if (mdsmap->get_epoch()) {
@@ -6451,7 +6579,7 @@ int Client::_do_lookup(Inode *dir, const string& name, int mask,
 		       InodeRef *target, const UserPerm& perms)
 {
   int op = dir->snapid == CEPH_SNAPDIR ? CEPH_MDS_OP_LOOKUPSNAP : CEPH_MDS_OP_LOOKUP;
-  MetaRequest *req = new MetaRequest(op);
+  MetaRequest *req = new MetaRequest(this, op);
   filepath path;
   dir->make_nosnap_relative_path(path);
   path.push_dentry(name);
@@ -6476,7 +6604,7 @@ int Client::_lookup(Inode *dir, const string& dname, int mask, InodeRef *target,
 
   if (dname == "..") {
     if (dir->dentries.empty()) {
-      MetaRequest *req = new MetaRequest(CEPH_MDS_OP_LOOKUPPARENT);
+      MetaRequest *req = new MetaRequest(this, CEPH_MDS_OP_LOOKUPPARENT);
       filepath path(dir->ino);
       req->set_filepath(path);
 
@@ -7028,7 +7156,7 @@ int Client::_getattr(Inode *in, int mask, const UserPerm& perms, bool force)
   if (yes && !force)
     return 0;
 
-  MetaRequest *req = new MetaRequest(CEPH_MDS_OP_GETATTR);
+  MetaRequest *req = new MetaRequest(this, CEPH_MDS_OP_GETATTR);
   filepath path;
   in->make_nosnap_relative_path(path);
   req->set_filepath(path);
@@ -7170,7 +7298,7 @@ int Client::_do_setattr(Inode *in, struct ceph_statx *stx, int mask,
   }
 
 force_request:
-  MetaRequest *req = new MetaRequest(CEPH_MDS_OP_SETATTR);
+  MetaRequest *req = new MetaRequest(this, CEPH_MDS_OP_SETATTR);
 
   filepath path;
 
@@ -8133,7 +8261,7 @@ int Client::_readdir_get_frag(dir_result_t *dirp)
 
   InodeRef& diri = dirp->inode;
 
-  MetaRequest *req = new MetaRequest(op);
+  MetaRequest *req = new MetaRequest(this, op);
   filepath path;
   diri->make_nosnap_relative_path(path);
   req->set_filepath(path); 
@@ -8740,7 +8868,7 @@ int Client::lookup_hash(inodeno_t ino, inodeno_t dirino, const char *name,
   if (unmounting)
     return -ENOTCONN;
 
-  MetaRequest *req = new MetaRequest(CEPH_MDS_OP_LOOKUPHASH);
+  MetaRequest *req = new MetaRequest(this, CEPH_MDS_OP_LOOKUPHASH);
   filepath path(ino);
   req->set_filepath(path);
 
@@ -8772,7 +8900,7 @@ int Client::_lookup_ino(inodeno_t ino, const UserPerm& perms, Inode **inode)
   if (unmounting)
     return -ENOTCONN;
 
-  MetaRequest *req = new MetaRequest(CEPH_MDS_OP_LOOKUPINO);
+  MetaRequest *req = new MetaRequest(this, CEPH_MDS_OP_LOOKUPINO);
   filepath path(ino);
   req->set_filepath(path);
 
@@ -8803,7 +8931,7 @@ int Client::_lookup_parent(Inode *ino, const UserPerm& perms, Inode **parent)
 {
   ldout(cct, 8) << __func__ << " enter(" << ino->ino << ")" << dendl;
 
-  MetaRequest *req = new MetaRequest(CEPH_MDS_OP_LOOKUPPARENT);
+  MetaRequest *req = new MetaRequest(this, CEPH_MDS_OP_LOOKUPPARENT);
   filepath path(ino->ino);
   req->set_filepath(path);
 
@@ -8835,7 +8963,7 @@ int Client::_lookup_name(Inode *ino, Inode *parent, const UserPerm& perms)
   if (unmounting)
     return -ENOTCONN;
 
-  MetaRequest *req = new MetaRequest(CEPH_MDS_OP_LOOKUPNAME);
+  MetaRequest *req = new MetaRequest(this, CEPH_MDS_OP_LOOKUPNAME);
   req->set_filepath2(filepath(parent->ino));
   req->set_filepath(filepath(ino->ino));
   req->set_inode(ino);
@@ -8950,7 +9078,7 @@ int Client::_open(Inode *in, int flags, mode_t mode, Fh **fhp,
     check_caps(in, CHECK_CAPS_NODELAY);
   } else {
 
-    MetaRequest *req = new MetaRequest(CEPH_MDS_OP_OPEN);
+    MetaRequest *req = new MetaRequest(this, CEPH_MDS_OP_OPEN);
     filepath path;
     in->make_nosnap_relative_path(path);
     req->set_filepath(path);
@@ -9025,7 +9153,7 @@ int Client::_renew_caps(Inode *in)
   else if (wanted & CEPH_CAP_FILE_WR)
     flags = O_WRONLY;
 
-  MetaRequest *req = new MetaRequest(CEPH_MDS_OP_OPEN);
+  MetaRequest *req = new MetaRequest(this, CEPH_MDS_OP_OPEN);
   filepath path;
   in->make_nosnap_relative_path(path);
   req->set_filepath(path);
@@ -10148,7 +10276,7 @@ void Client::_getcwd(string& dir, const UserPerm& perms)
     if (!dn) {
       // look it up
       ldout(cct, 10) << __func__ << " looking up parent for " << *in << dendl;
-      MetaRequest *req = new MetaRequest(CEPH_MDS_OP_LOOKUPNAME);
+      MetaRequest *req = new MetaRequest(this, CEPH_MDS_OP_LOOKUPNAME);
       filepath path(in->ino);
       req->set_filepath(path);
       req->set_inode(in);
@@ -10308,7 +10436,7 @@ int Client::_do_filelock(Inode *in, Fh *fh, int lock_type, int op, int sleep,
    */
   owner |= (1ULL << 63);
 
-  MetaRequest *req = new MetaRequest(op);
+  MetaRequest *req = new MetaRequest(this, op);
   filepath path;
   in->make_nosnap_relative_path(path);
   req->set_filepath(path);
@@ -10411,7 +10539,7 @@ int Client::_interrupt_filelock(MetaRequest *req)
     return -EINVAL;
   }
 
-  MetaRequest *intr_req = new MetaRequest(CEPH_MDS_OP_SETFILELOCK);
+  MetaRequest *intr_req = new MetaRequest(this, CEPH_MDS_OP_SETFILELOCK);
   filepath path;
   in->make_nosnap_relative_path(path);
   intr_req->set_filepath(path);
@@ -11667,7 +11795,7 @@ int Client::_do_setxattr(Inode *in, const char *name, const void *value,
   if (flags & XATTR_REPLACE)
     xattr_flags |= CEPH_XATTR_REPLACE;
 
-  MetaRequest *req = new MetaRequest(CEPH_MDS_OP_SETXATTR);
+  MetaRequest *req = new MetaRequest(this, CEPH_MDS_OP_SETXATTR);
   filepath path;
   in->make_nosnap_relative_path(path);
   req->set_filepath(path);
@@ -11883,7 +12011,7 @@ int Client::_removexattr(Inode *in, const char *name, const UserPerm& perms)
   if (vxattr && vxattr->readonly)
     return -EOPNOTSUPP;
 
-  MetaRequest *req = new MetaRequest(CEPH_MDS_OP_RMXATTR);
+  MetaRequest *req = new MetaRequest(this, CEPH_MDS_OP_RMXATTR);
   filepath path;
   in->make_nosnap_relative_path(path);
   req->set_filepath(path);
@@ -12226,7 +12354,7 @@ int Client::_mknod(Inode *dir, const char *name, mode_t mode, dev_t rdev,
     return -EDQUOT;
   }
 
-  MetaRequest *req = new MetaRequest(CEPH_MDS_OP_MKNOD);
+  MetaRequest *req = new MetaRequest(this, CEPH_MDS_OP_MKNOD);
 
   filepath path;
   dir->make_nosnap_relative_path(path);
@@ -12373,7 +12501,7 @@ int Client::_create(Inode *dir, const char *name, int flags, mode_t mode,
       return -ERANGE;  // bummer!
   }
 
-  MetaRequest *req = new MetaRequest(CEPH_MDS_OP_CREATE);
+  MetaRequest *req = new MetaRequest(this, CEPH_MDS_OP_CREATE);
 
   filepath path;
   dir->make_nosnap_relative_path(path);
@@ -12451,7 +12579,7 @@ int Client::_mkdir(Inode *dir, const char *name, mode_t mode, const UserPerm& pe
   if (is_quota_files_exceeded(dir, perm)) {
     return -EDQUOT;
   }
-  MetaRequest *req = new MetaRequest(dir->snapid == CEPH_SNAPDIR ?
+  MetaRequest *req = new MetaRequest(this, dir->snapid == CEPH_SNAPDIR ?
 				     CEPH_MDS_OP_MKSNAP : CEPH_MDS_OP_MKDIR);
 
   filepath path;
@@ -12582,7 +12710,7 @@ int Client::_symlink(Inode *dir, const char *name, const char *target,
     return -EDQUOT;
   }
 
-  MetaRequest *req = new MetaRequest(CEPH_MDS_OP_SYMLINK);
+  MetaRequest *req = new MetaRequest(this, CEPH_MDS_OP_SYMLINK);
 
   filepath path;
   dir->make_nosnap_relative_path(path);
@@ -12694,7 +12822,7 @@ int Client::_unlink(Inode *dir, const char *name, const UserPerm& perm)
     return -EROFS;
   }
 
-  MetaRequest *req = new MetaRequest(CEPH_MDS_OP_UNLINK);
+  MetaRequest *req = new MetaRequest(this, CEPH_MDS_OP_UNLINK);
 
   filepath path;
   dir->make_nosnap_relative_path(path);
@@ -12766,7 +12894,7 @@ int Client::_rmdir(Inode *dir, const char *name, const UserPerm& perms)
   }
   
   int op = dir->snapid == CEPH_SNAPDIR ? CEPH_MDS_OP_RMSNAP : CEPH_MDS_OP_RMDIR;
-  MetaRequest *req = new MetaRequest(op);
+  MetaRequest *req = new MetaRequest(this, op);
   filepath path;
   dir->make_nosnap_relative_path(path);
   path.push_dentry(name);
@@ -12851,7 +12979,7 @@ int Client::_rename(Inode *fromdir, const char *fromname, Inode *todir, const ch
   }
 
   InodeRef target;
-  MetaRequest *req = new MetaRequest(op);
+  MetaRequest *req = new MetaRequest(this, op);
 
   filepath from;
   fromdir->make_nosnap_relative_path(from);
@@ -13035,7 +13163,8 @@ int Client::_link(Inode *in, Inode *dir, const char *newname, const UserPerm& pe
   }
 
   in->break_all_delegs();
-  MetaRequest *req = new MetaRequest(CEPH_MDS_OP_LINK);
+
+  MetaRequest *req = new MetaRequest(this, CEPH_MDS_OP_LINK);
 
   filepath path(newname, dir->ino);
   req->set_filepath(path);
@@ -14795,6 +14924,16 @@ void intrusive_ptr_add_ref(MetaSession *s)
 void intrusive_ptr_release(MetaSession *s)
 {
   s->client->put_session(s);
+}
+
+void intrusive_ptr_add_ref(MetaRequest *request)
+{
+  request->get();
+}
+
+void intrusive_ptr_release(MetaRequest *request)
+{
+  request->client->put_request(request);
 }
 
 mds_rank_t Client::_get_random_up_mds() const
