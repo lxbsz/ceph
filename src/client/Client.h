@@ -235,6 +235,7 @@ public:
   friend class C_Client_CacheRelease; // Asserts on client_lock
   friend class SyntheticClient;
   friend void intrusive_ptr_release(Inode *in);
+  friend void intrusive_ptr_release(MetaSession *s);
 
   using Dispatcher::cct;
 
@@ -622,18 +623,18 @@ public:
 
   // file caps
   void check_cap_issue(Inode *in, unsigned issued);
-  void add_update_cap(Inode *in, MetaSession *session, uint64_t cap_id,
+  void add_update_cap(Inode *in, MetaSessionRef &session, uint64_t cap_id,
 		      unsigned issued, unsigned wanted, unsigned seq, unsigned mseq,
 		      inodeno_t realm, int flags, const UserPerm& perms);
   void remove_cap(Cap *cap, bool queue_release);
   void remove_all_caps(Inode *in);
-  void remove_session_caps(MetaSession *session, int err);
+  void remove_session_caps(MetaSessionRef &session, int err);
   int mark_caps_flushing(Inode *in, ceph_tid_t *ptid);
-  void adjust_session_flushing_caps(Inode *in, MetaSession *old_s, MetaSession *new_s);
+  void adjust_session_flushing_caps(Inode *in, MetaSessionRef old_s, MetaSessionRef new_s);
   void flush_caps_sync();
-  void kick_flushing_caps(Inode *in, MetaSession *session);
-  void kick_flushing_caps(MetaSession *session);
-  void early_kick_flushing_caps(MetaSession *session);
+  void kick_flushing_caps(Inode *in, MetaSessionRef &session);
+  void kick_flushing_caps(MetaSessionRef &session);
+  void early_kick_flushing_caps(MetaSessionRef &session);
   int get_caps(Fh *fh, int need, int want, int *have, loff_t endoff);
   int get_caps_used(Inode *in);
 
@@ -643,19 +644,19 @@ public:
   void handle_quota(const MConstRef<MClientQuota>& m);
   void handle_snap(const MConstRef<MClientSnap>& m);
   void handle_caps(const MConstRef<MClientCaps>& m);
-  void handle_cap_import(MetaSession *session, Inode *in, const MConstRef<MClientCaps>& m);
-  void handle_cap_export(MetaSession *session, Inode *in, const MConstRef<MClientCaps>& m);
-  void handle_cap_trunc(MetaSession *session, Inode *in, const MConstRef<MClientCaps>& m);
-  void handle_cap_flush_ack(MetaSession *session, Inode *in, Cap *cap, const MConstRef<MClientCaps>& m);
-  void handle_cap_flushsnap_ack(MetaSession *session, Inode *in, const MConstRef<MClientCaps>& m);
-  void handle_cap_grant(MetaSession *session, Inode *in, Cap *cap, const MConstRef<MClientCaps>& m);
+  void handle_cap_import(MetaSessionRef &session, Inode *in, const MConstRef<MClientCaps>& m);
+  void handle_cap_export(MetaSessionRef &session, Inode *in, const MConstRef<MClientCaps>& m);
+  void handle_cap_trunc(MetaSessionRef &session, Inode *in, const MConstRef<MClientCaps>& m);
+  void handle_cap_flush_ack(MetaSessionRef &session, Inode *in, Cap *cap, const MConstRef<MClientCaps>& m);
+  void handle_cap_flushsnap_ack(MetaSessionRef &session, Inode *in, const MConstRef<MClientCaps>& m);
+  void handle_cap_grant(MetaSessionRef &session, Inode *in, Cap *cap, const MConstRef<MClientCaps>& m);
   void cap_delay_requeue(Inode *in);
 
-  void send_cap(Inode *in, MetaSession *session, Cap *cap, int flags,
+  void send_cap(Inode *in, MetaSessionRef &session, Cap *cap, int flags,
 		int used, int want, int retain, int flush,
 		ceph_tid_t flush_tid);
 
-  void send_flush_snap(Inode *in, MetaSession *session, snapid_t follows, CapSnap& capsnap);
+  void send_flush_snap(Inode *in, MetaSessionRef &session, snapid_t follows, CapSnap& capsnap);
 
   void flush_snaps(Inode *in);
   void get_cap_ref(Inode *in, int cap);
@@ -706,29 +707,29 @@ public:
   void update_dir_dist(Inode *in, DirStat *st);
 
   void clear_dir_complete_and_ordered(Inode *diri, bool complete);
-  void insert_readdir_results(MetaRequest *request, MetaSession *session, Inode *diri);
-  Inode* insert_trace(MetaRequest *request, MetaSession *session);
+  void insert_readdir_results(MetaRequest *request, MetaSessionRef &session, Inode *diri);
+  Inode* insert_trace(MetaRequest *request, MetaSessionRef &session);
   void update_inode_file_size(Inode *in, int issued, uint64_t size,
 			      uint64_t truncate_seq, uint64_t truncate_size);
   void update_inode_file_time(Inode *in, int issued, uint64_t time_warp_seq,
 			      utime_t ctime, utime_t mtime, utime_t atime);
 
-  Inode *add_update_inode(InodeStat *st, utime_t ttl, MetaSession *session,
+  Inode *add_update_inode(InodeStat *st, utime_t ttl, MetaSessionRef &session,
 			  const UserPerm& request_perms);
   Dentry *insert_dentry_inode(Dir *dir, const string& dname, LeaseStat *dlease,
-			      Inode *in, utime_t from, MetaSession *session,
+			      Inode *in, utime_t from, MetaSessionRef &session,
 			      Dentry *old_dentry = NULL);
-  void update_dentry_lease(Dentry *dn, LeaseStat *dlease, utime_t from, MetaSession *session);
+  void update_dentry_lease(Dentry *dn, LeaseStat *dlease, utime_t from, MetaSessionRef &session);
 
   bool use_faked_inos() { return _use_faked_inos; }
   vinodeno_t map_faked_ino(ino_t ino);
 
   //notify the mds to flush the mdlog
   void flush_mdlog_sync();
-  void flush_mdlog(MetaSession *session);
+  void flush_mdlog(MetaSessionRef &session);
 
   void renew_caps();
-  void renew_caps(MetaSession *session);
+  void renew_caps(MetaSessionRef &session);
   void flush_cap_releases();
   void tick();
 
@@ -764,17 +765,18 @@ protected:
 
   void get_session_metadata(std::map<std::string, std::string> *meta) const;
   bool have_open_session(mds_rank_t mds);
-  void got_mds_push(MetaSession *s);
+  void got_mds_push(MetaSessionRef &s);
   MetaSession *_get_mds_session(mds_rank_t mds, Connection *con);  ///< return session for mds *and* con; null otherwise
   MetaSession *_get_or_open_mds_session(mds_rank_t mds);
   MetaSession *_open_mds_session(mds_rank_t mds);
-  void _close_mds_session(MetaSession *s);
-  void _closed_mds_session(MetaSession *s, int err=0, bool rejected=false);
+  void _close_mds_session(MetaSessionRef &s);
+  void put_session(MetaSession *s);
+  void _closed_mds_session(MetaSessionRef &s, int err=0, bool rejected=false);
   bool _any_stale_sessions() const;
   void _kick_stale_sessions();
   void handle_client_session(const MConstRef<MClientSession>& m);
-  void send_reconnect(MetaSession *s);
-  void resend_unsafe_requests(MetaSession *s);
+  void send_reconnect(MetaSessionRef &s);
+  void resend_unsafe_requests(MetaSessionRef &s);
   void wait_unsafe_requests();
 
   void _sync_write_commit(Inode *in);
@@ -788,7 +790,7 @@ protected:
   void put_request(MetaRequest *request);
   void unregister_request(MetaRequest *request);
 
-  int verify_reply_trace(int r, MetaSession *session, MetaRequest *request,
+  int verify_reply_trace(int r, MetaSessionRef &session, MetaRequest *request,
 			 const MConstRef<MClientReply>& reply,
 			 InodeRef *ptarget, bool *pcreated,
 			 const UserPerm& perms);
@@ -800,11 +802,11 @@ protected:
 			     mds_rank_t mds, int drop, int unless);
   mds_rank_t choose_target_mds(MetaRequest *req, Inode** phash_diri=NULL);
   void connect_mds_targets(mds_rank_t mds);
-  void send_request(MetaRequest *request, MetaSession *session,
+  void send_request(MetaRequest *request, MetaSessionRef &session,
 		    bool drop_cap_releases=false);
   MRef<MClientRequest> build_client_request(MetaRequest *request);
-  void kick_requests(MetaSession *session);
-  void kick_requests_closed(MetaSession *session);
+  void kick_requests(MetaSessionRef &session);
+  void kick_requests_closed(MetaSessionRef &session);
   void handle_client_request_forward(const MConstRef<MClientRequestForward>& reply);
   void handle_client_reply(const MConstRef<MClientReply>& reply);
   bool is_dir_operation(MetaRequest *request);
@@ -848,7 +850,7 @@ protected:
   }
 
   // helpers
-  void wake_up_session_caps(MetaSession *s, bool reconnect);
+  void wake_up_session_caps(MetaSessionRef &s, bool reconnect);
 
   void wait_on_context_list(list<Context*>& ls);
   void signal_context_list(list<Context*>& ls);
@@ -894,9 +896,9 @@ protected:
 
   // trim cache.
   void trim_cache(bool trim_kernel_dcache=false);
-  void trim_cache_for_reconnect(MetaSession *s);
+  void trim_cache_for_reconnect(MetaSessionRef &s);
   void trim_dentry(Dentry *dn);
-  void trim_caps(MetaSession *s, uint64_t max);
+  void trim_caps(MetaSessionRef &s, uint64_t max);
   void _invalidate_kernel_dcache();
   void _trim_negative_child_dentries(InodeRef& in);
 
@@ -904,7 +906,7 @@ protected:
   void dump_cache(Formatter *f);  // debug
 
   // force read-only
-  void force_session_readonly(MetaSession *s);
+  void force_session_readonly(MetaSessionRef &s);
 
   void dump_status(Formatter *f);  // debug
 
