@@ -36,6 +36,7 @@
 #include "msg/MessageRef.h"
 #include "msg/Messenger.h"
 #include "osdc/ObjectCacher.h"
+#include "MetaRequestRef.h"
 
 #include "RWRef.h"
 #include "InodeRef.h"
@@ -240,6 +241,7 @@ public:
   friend class SyntheticClient;
   friend void intrusive_ptr_release(Inode *in);
   friend void intrusive_ptr_release(MetaSession *s);
+  friend void intrusive_ptr_release(MetaRequest *request);
   template <typename T> friend struct RWRefState;
   template <typename T> friend class RWRef;
 
@@ -598,7 +600,7 @@ public:
   int ll_delegation(Fh *fh, unsigned cmd, ceph_deleg_cb_t cb, void *priv);
 
   entity_name_t get_myname() { return messenger->get_myname(); }
-  void wait_on_list(std::list<ceph::condition_variable*>& ls);
+  void wait_on_list(std::list<ceph::condition_variable*>& ls, MetaRequest *req=NULL);
   void signal_cond_list(std::list<ceph::condition_variable*>& ls);
 
   void set_filer_flags(int flags);
