@@ -829,9 +829,7 @@ Inode * Client::add_update_inode(InodeStat *st, utime_t from,
   Inode *in;
   bool was_new = false;
 
-  ceph_assert(ceph_mutex_is_locked_by_me(client_lock));
-
-  client_lock.unlock();
+  ceph_assert(!ceph_mutex_is_locked_by_me(client_lock));
 
   inode_map_lock.lock();
   if (inode_map.count(st->vino)) {
@@ -950,7 +948,7 @@ Inode * Client::add_update_inode(InodeStat *st, utime_t from,
     ldout(cct, 12) << __func__ << " adding " << *in << " caps " << ccap_string(st->cap.caps) << dendl;
 
   if (!st->cap.caps)
-    goto lock; // as with readdir returning indoes in different snaprealms (no caps!)
+    return in; // as with readdir returning indoes in different snaprealms (no caps!)
 
   if (in->snapid == CEPH_NOSNAP) {
     add_update_cap(in, session, st->cap.cap_id, st->cap.caps, st->cap.wanted,
@@ -984,8 +982,6 @@ Inode * Client::add_update_inode(InodeStat *st, utime_t from,
     in->snap_caps |= st->cap.caps;
   }
 
-lock:
-  client_lock.lock();
   return in;
 }
 
@@ -998,6 +994,9 @@ Dentry *Client::insert_dentry_inode(Dir *dir, const string& dname, LeaseStat *dl
 				    Dentry *old_dentry)
 {
   Dentry *dn = NULL;
+
+  ceph_assert(!ceph_mutex_is_locked_by_me(client_lock));
+
   if (dir->dentries.count(dname))
     dn = dir->dentries[dname];
 
@@ -1041,6 +1040,8 @@ Dentry *Client::insert_dentry_inode(Dir *dir, const string& dname, LeaseStat *dl
 
 void Client::update_dentry_lease(Dentry *dn, LeaseStat *dlease, utime_t from, MetaSessionRef &session)
 {
+  ceph_assert(!ceph_mutex_is_locked_by_me(client_lock));
+
   utime_t dttl = from;
   dttl += (float)dlease->duration_ms / 1000.0;
   
@@ -1051,9 +1052,12 @@ void Client::update_dentry_lease(Dentry *dn, LeaseStat *dlease, utime_t from, Me
       ldout(cct, 10) << "got dentry lease on " << dn->name
 	       << " dur " << dlease->duration_ms << "ms ttl " << dttl << dendl;
       dn->lease_ttl = dttl;
-      dn->lease_mds = session->mds_num;
       dn->lease_seq = dlease->seq;
+
+      client_lock.lock();
+      dn->lease_mds = session->mds_num;
       dn->lease_gen = session->cap_gen;
+      client_lock.unlock();
     }
   }
   dn->cap_shared_gen = dn->dir->parent_inode->shared_gen;
@@ -1103,6 +1107,8 @@ void Client::clear_dir_complete_and_ordered(Inode *diri, bool complete)
  */
 void Client::insert_readdir_results(MetaRequestRef &request, MetaSessionRef &session, Inode *diri) {
   ceph_assert(!ceph_mutex_is_locked_by_me(client_lock));
+
+  std::lock_guard il(diri->inode_lock);
 
   auto& reply = request->reply;
   ConnectionRef con = request->reply->get_connection();
@@ -1298,13 +1304,14 @@ Inode* Client::insert_trace(MetaRequestRef &request, MetaSessionRef &session)
   if (p.end()) {
     ldout(cct, 10) << "insert_trace -- no trace" << dendl;
 
-    std::lock_guard l(client_lock);
-
     Dentry *d = request->dentry();
     if (d) {
-      Inode *diri = d->dir->parent_inode;
-      diri->dir_release_count++;
-      clear_dir_complete_and_ordered(diri, true);
+      InodeRef diri = d->dir->parent_inode;
+      {
+        std::lock_guard il(diri->inode_lock);
+        diri->dir_release_count++;
+        clear_dir_complete_and_ordered(diri, true);
+      }
     }
 
     if (d && reply->get_result() == 0) {
@@ -1378,16 +1385,23 @@ Inode* Client::insert_trace(MetaRequestRef &request, MetaSessionRef &session)
     in = add_update_inode(&ist, request->sent_stamp, session,
 			  request->perms);
   }
+  InodeRef tmp_in_ref(in);
 
   Inode *diri = NULL;
   if (reply->head.is_dentry) {
     std::lock_guard l(client_lock);
     diri = add_update_inode(&dirst, request->sent_stamp, session,
 			    request->perms);
-    update_dir_dist(diri, &dst);  // dir stat info is attached to ..
+    InodeRef tmp_diri_ref(diri);
 
+    std::lock_guard il(diri->inode_lock);
+    update_dir_dist(diri, &dst);  // dir stat info is attached to ..
     if (in) {
       Dir *dir = diri->open_dir();
+      /*
+       * In insert_dentry_inode() it will only access 'in->vino()',
+       * which no need to under in's inode_lock.
+       */
       insert_dentry_inode(dir, dname, &dlease, in, request->sent_stamp, session,
                           (op == CEPH_MDS_OP_RENAME) ? request->old_dentry() : NULL);
     } else {
@@ -1415,16 +1429,18 @@ Inode* Client::insert_trace(MetaRequestRef &request, MetaSessionRef &session)
     vinodeno_t vino = ist.vino;
     vino.snapid = CEPH_SNAPDIR;
 
-    std::lock_guard l(client_lock);
-
+    inode_map_lock.lock();
     ceph_assert(inode_map.count(vino));
     diri = inode_map[vino];
+    InodeRef tmp_diri_ref(diri);
+    inode_map_lock.unlock();
 
     string dname = request->path.last_dentry();
 
     LeaseStat dlease;
     dlease.duration_ms = 0;
 
+    std::lock_guard il(diri->inode_lock);
     if (in) {
       Dir *dir = diri->open_dir();
       insert_dentry_inode(dir, dname, &dlease, in, request->sent_stamp, session);
@@ -1456,6 +1472,7 @@ Inode* Client::insert_trace(MetaRequestRef &request, MetaSessionRef &session)
     put_snap_realm(realm);
 
   request->target = in;
+  client_lock.lock();
   return in;
 }
 
@@ -3267,6 +3284,10 @@ Dentry* Client::link(Dir *dir, const string& name, Inode *in, Dentry *dn)
 
 void Client::unlink(Dentry *dn, bool keepdir, bool keepdentry)
 {
+  Dir *dir = dn->dir;
+  InodeRef diri(dir->parent_inode);
+  std::lock_guard il{diri->inode_lock};
+
   InodeRef in(dn->inode);
   ldout(cct, 15) << "unlink dir " << dn->dir->parent_inode << " '" << dn->name << "' dn " << dn
 		 << " inode " << dn->inode << dendl;
@@ -3283,7 +3304,6 @@ void Client::unlink(Dentry *dn, bool keepdir, bool keepdentry)
     ldout(cct, 15) << "unlink  removing '" << dn->name << "' dn " << dn << dendl;
 
     // unlink from dir
-    Dir *dir = dn->dir;
     dn->detach();
 
     // delete den
