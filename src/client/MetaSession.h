@@ -9,14 +9,18 @@
 #include "include/xlist.h"
 #include "mds/MDSMap.h"
 #include "mds/mdstypes.h"
+#include "MetaSessionRef.h"
 #include "messages/MClientCapRelease.h"
 
 struct Cap;
+class Client;
 struct Inode;
 struct CapSnap;
 struct MetaRequest;
 
 struct MetaSession {
+  Client *client;
+
   mds_rank_t mds_num;
   ConnectionRef con;
   version_t seq;
@@ -25,6 +29,8 @@ struct MetaSession {
   uint64_t cap_renew_seq;
   entity_addrvec_t addrs;
   feature_bitset_t mds_features;
+
+  int _ref; // ref count.
 
   enum {
     STATE_NEW, // Unused
@@ -56,13 +62,22 @@ struct MetaSession {
 
   ceph::ref_t<MClientCapRelease> release;
 
-  MetaSession(mds_rank_t mds_num, ConnectionRef con,
+  MetaSession(Client *c, mds_rank_t mds_num, ConnectionRef con,
 	      const entity_addrvec_t& addrs)
-    : mds_num(mds_num), con(con),
+    : client(c), mds_num(mds_num), con(con),
       seq(0), cap_gen(0), cap_renew_seq(0), addrs(addrs),
-      state(STATE_OPENING), reclaim_state(RECLAIM_NULL),
+      _ref(1), state(STATE_OPENING), reclaim_state(RECLAIM_NULL),
       mds_state(MDSMap::STATE_NULL), readonly(false)
   {}
+
+  MetaSession *get() { _ref++; return this; }
+
+  /* Private method to put a reference; see Client::put_session() */
+  int _put() { ceph_assert(--_ref >= 0); return _ref; }
+
+  int get_num_ref() {
+    return _ref;
+  }
 
   const char *get_state_name() const;
 
