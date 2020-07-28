@@ -711,6 +711,8 @@ void Client::update_inode_file_size(Inode *in, int issued, uint64_t size,
 {
   uint64_t prior_size = in->size;
 
+  ceph_assert(ceph_mutex_is_locked_by_me(in->inode_lock));
+
   if (truncate_seq > in->truncate_seq ||
       (truncate_seq == in->truncate_seq && size > in->size)) {
     ldout(cct, 10) << "size " << in->size << " -> " << size << dendl;
@@ -751,6 +753,8 @@ void Client::update_inode_file_size(Inode *in, int issued, uint64_t size,
 void Client::update_inode_file_time(Inode *in, int issued, uint64_t time_warp_seq,
 				    utime_t ctime, utime_t mtime, utime_t atime)
 {
+  ceph_assert(ceph_mutex_is_locked_by_me(in->inode_lock));
+
   ldout(cct, 10) << __func__ << " " << *in << " " << ccap_string(issued)
 		 << " ctime " << ctime << " mtime " << mtime << dendl;
 
@@ -824,6 +828,12 @@ Inode * Client::add_update_inode(InodeStat *st, utime_t from,
 {
   Inode *in;
   bool was_new = false;
+
+  ceph_assert(ceph_mutex_is_locked_by_me(client_lock));
+
+  client_lock.unlock();
+
+  inode_map_lock.lock();
   if (inode_map.count(st->vino)) {
     in = inode_map[st->vino];
     ldout(cct, 12) << __func__ << " had " << *in << " caps " << ccap_string(st->cap.caps) << dendl;
@@ -851,7 +861,10 @@ Inode * Client::add_update_inode(InodeStat *st, utime_t from,
     in->mode = st->mode & S_IFMT;
     was_new = true;
   }
+  InodeRef tmp_ref(in);
+  inode_map_lock.unlock();
 
+  std::lock_guard l(in->inode_lock);
   in->rdev = st->rdev;
   if (in->is_symlink())
     in->symlink = st->symlink;
@@ -937,7 +950,7 @@ Inode * Client::add_update_inode(InodeStat *st, utime_t from,
     ldout(cct, 12) << __func__ << " adding " << *in << " caps " << ccap_string(st->cap.caps) << dendl;
 
   if (!st->cap.caps)
-    return in;   // as with readdir returning indoes in different snaprealms (no caps!)
+    goto lock; // as with readdir returning indoes in different snaprealms (no caps!)
 
   if (in->snapid == CEPH_NOSNAP) {
     add_update_cap(in, session, st->cap.cap_id, st->cap.caps, st->cap.wanted,
@@ -971,6 +984,8 @@ Inode * Client::add_update_inode(InodeStat *st, utime_t from,
     in->snap_caps |= st->cap.caps;
   }
 
+lock:
+  client_lock.lock();
   return in;
 }
 
@@ -3472,9 +3487,13 @@ int Client::get_caps_used(Inode *in)
 
 void Client::cap_delay_requeue(Inode *in)
 {
+  ceph_assert(!ceph_mutex_is_locked(client_lock));
+
   ldout(cct, 10) << __func__ << " on " << *in << dendl;
   in->hold_caps_until = ceph_clock_now();
   in->hold_caps_until += cct->_conf->client_caps_release_delay;
+
+  std::lock_guard l(client_lock);
   delayed_list.push_back(&in->delay_cap_item);
 }
 
@@ -3660,8 +3679,10 @@ void Client::check_caps(Inode *in, unsigned flags)
 
   int orig_used = used;
   used = adjust_caps_used_for_lazyio(used, issued, implemented);
-
   int retain = wanted | used | CEPH_CAP_PIN;
+
+  ceph_assert(!ceph_mutex_is_locked(client_lock));
+
   if (!unmounting && in->nlink > 0) {
     if (wanted) {
       retain |= CEPH_CAP_ANY;
@@ -3757,6 +3778,7 @@ void Client::check_caps(Inode *in, unsigned flags)
     }
 
   ack:
+    std::lock_guard l(client_lock);
     MetaSessionRef session = &mds_sessions.at(mds);
 
     if (&cap == in->auth_cap) {
@@ -4168,6 +4190,8 @@ void Client::add_update_cap(Inode *in, MetaSessionRef &session, uint64_t cap_id,
 			    unsigned issued, unsigned wanted, unsigned seq, unsigned mseq,
 			    inodeno_t realm, int flags, const UserPerm& cap_perms)
 {
+  ceph_assert(!ceph_mutex_is_locked_by_me(client_lock));
+
   if (!in->is_any_caps()) {
     ceph_assert(in->snaprealm == 0);
     in->snaprealm = get_snap_realm(realm);
@@ -4185,13 +4209,15 @@ void Client::add_update_cap(Inode *in, MetaSessionRef &session, uint64_t cap_id,
     }
   }
 
+  client_lock.lock();
   mds_rank_t mds = session->mds_num;
-  const auto &capem = in->caps.emplace(std::piecewise_construct, std::forward_as_tuple(mds), std::forward_as_tuple(*in, session.get()));
+  const auto &capem = in->caps.emplace(std::piecewise_construct, std::forward_as_tuple(mds), std::forward_as_tuple(*in, session));
   Cap &cap = capem.first->second;
   if (!capem.second) {
     if (cap.gen < session->cap_gen)
       cap.issued = cap.implemented = CEPH_CAP_PIN;
 
+    client_lock.unlock();
     /*
      * auth mds of the inode changed. we received the cap export
      * message, but still haven't received the cap import message.
@@ -4211,7 +4237,10 @@ void Client::add_update_cap(Inode *in, MetaSessionRef &session, uint64_t cap_id,
       issued |= cap.issued;
       flags |= CEPH_CAP_FLAG_AUTH;
     }
+    client_lock.lock();
   }
+  cap.gen = session->cap_gen;
+  client_lock.unlock();
 
   check_cap_issue(in, issued);
 
@@ -4221,7 +4250,9 @@ void Client::add_update_cap(Inode *in, MetaSessionRef &session, uint64_t cap_id,
       if (in->auth_cap && in->flushing_cap_item.is_on_list()) {
 	ldout(cct, 10) << __func__ << " changing auth cap: "
 		       << "add myself to new auth MDS' flushing caps list" << dendl;
+        client_lock.lock();
 	adjust_session_flushing_caps(in, in->auth_cap->session, session);
+        client_lock.unlock();
       }
       in->auth_cap = &cap;
     }
@@ -4238,7 +4269,6 @@ void Client::add_update_cap(Inode *in, MetaSessionRef &session, uint64_t cap_id,
   cap.seq = seq;
   cap.issue_seq = seq;
   cap.mseq = mseq;
-  cap.gen = session->cap_gen;
   cap.latest_perms = cap_perms;
   ldout(cct, 10) << __func__ << " issued " << ccap_string(old_caps) << " -> " << ccap_string(cap.issued)
 	   << " from mds." << mds
