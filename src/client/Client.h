@@ -625,7 +625,7 @@ public:
   int uninline_data(Inode *in, Context *onfinish);
 
   // file caps
-  void check_cap_issue(Inode *in, unsigned issued);
+  void check_cap_issue(InodeRef &in, unsigned issued);
   void add_update_cap(Inode *in, MetaSessionRef &session, uint64_t cap_id,
 		      unsigned issued, unsigned wanted, unsigned seq, unsigned mseq,
 		      inodeno_t realm, int flags, const UserPerm& perms);
@@ -635,7 +635,7 @@ public:
   int mark_caps_flushing(Inode *in, ceph_tid_t *ptid);
   void adjust_session_flushing_caps(Inode *in, MetaSessionRef old_s, MetaSessionRef new_s);
   void flush_caps_sync();
-  void kick_flushing_caps(Inode *in, MetaSessionRef &session);
+  void kick_flushing_caps(InodeRef &in, MetaSessionRef &session);
   void kick_flushing_caps(MetaSessionRef &session);
   void early_kick_flushing_caps(MetaSessionRef &session);
   int get_caps(Fh *fh, int need, int want, int *have, loff_t endoff);
@@ -647,13 +647,13 @@ public:
   void handle_quota(const MConstRef<MClientQuota>& m);
   void handle_snap(const MConstRef<MClientSnap>& m);
   void handle_caps(const MConstRef<MClientCaps>& m);
-  void handle_cap_import(MetaSessionRef &session, Inode *in, const MConstRef<MClientCaps>& m);
-  void handle_cap_export(MetaSessionRef &session, Inode *in, const MConstRef<MClientCaps>& m);
-  void handle_cap_trunc(MetaSessionRef &session, Inode *in, const MConstRef<MClientCaps>& m);
-  void handle_cap_flush_ack(MetaSessionRef &session, Inode *in, Cap *cap, const MConstRef<MClientCaps>& m);
-  void handle_cap_flushsnap_ack(MetaSessionRef &session, Inode *in, const MConstRef<MClientCaps>& m);
-  void handle_cap_grant(MetaSessionRef &session, Inode *in, Cap *cap, const MConstRef<MClientCaps>& m);
-  void cap_delay_requeue(Inode *in);
+  void handle_cap_import(MetaSessionRef &session, InodeRef &in, const MConstRef<MClientCaps>& m);
+  void handle_cap_export(MetaSessionRef &session, InodeRef &in, const MConstRef<MClientCaps>& m);
+  void handle_cap_trunc(MetaSessionRef &session, InodeRef &in, const MConstRef<MClientCaps>& m);
+  void handle_cap_flush_ack(MetaSessionRef &session, InodeRef &in, Cap *cap, const MConstRef<MClientCaps>& m);
+  void handle_cap_flushsnap_ack(MetaSessionRef &session, InodeRef &in, const MConstRef<MClientCaps>& m);
+  void handle_cap_grant(MetaSessionRef &session, InodeRef &in, Cap *cap, const MConstRef<MClientCaps>& m);
+  void cap_delay_requeue(InodeRef &in);
 
   void send_cap(Inode *in, MetaSessionRef &session, Cap *cap, int flags,
 		int used, int want, int retain, int flush,
@@ -707,20 +707,20 @@ public:
   void unlock_fh_pos(Fh *f);
 
   // metadata cache
-  void update_dir_dist(Inode *in, DirStat *st);
+  void update_dir_dist(InodeRef &in, DirStat *st);
 
-  void clear_dir_complete_and_ordered(Inode *diri, bool complete);
-  void insert_readdir_results(MetaRequestRef &request, MetaSessionRef &session, Inode *diri);
+  void clear_dir_complete_and_ordered(InodeRef &diri, bool complete);
+  void insert_readdir_results(MetaRequestRef &request, MetaSessionRef &session, InodeRef &diri);
   Inode* insert_trace(MetaRequestRef &request, MetaSessionRef &session);
   void update_inode_file_size(Inode *in, int issued, uint64_t size,
 			      uint64_t truncate_seq, uint64_t truncate_size);
   void update_inode_file_time(Inode *in, int issued, uint64_t time_warp_seq,
 			      utime_t ctime, utime_t mtime, utime_t atime);
 
-  Inode *add_update_inode(InodeStat *st, utime_t ttl, MetaSessionRef &session,
+  InodeRef add_update_inode(InodeStat *st, utime_t ttl, MetaSessionRef &session,
 			  const UserPerm& request_perms);
   Dentry *insert_dentry_inode(Dir *dir, const string& dname, LeaseStat *dlease,
-			      Inode *in, utime_t from, MetaSessionRef &session,
+			      InodeRef &in, utime_t from, MetaSessionRef &session,
 			      Dentry *old_dentry = NULL);
   void update_dentry_lease(Dentry *dn, LeaseStat *dlease, utime_t from, MetaSessionRef &session);
 
@@ -879,7 +879,7 @@ protected:
    * leave dn set to default NULL unless you're trying to add
    * a new inode to a pre-created Dentry
    */
-  Dentry* link(Dir *dir, const string& name, Inode *in, Dentry *dn);
+  Dentry* link(Dir *dir, const string& name, InodeRef &in, Dentry *dn);
   void unlink(Dentry *dn, bool keepdir, bool keepdentry);
 
   // path traversal for high-level interface
@@ -1032,7 +1032,7 @@ private:
   void _closedir(dir_result_t *dirp);
 
   // other helpers
-  void _fragmap_remove_non_leaves(Inode *in);
+  void _fragmap_remove_non_leaves(InodeRef &in);
   void _fragmap_remove_stopped_mds(Inode *in, mds_rank_t mds);
 
   void _ll_get(Inode *in);
