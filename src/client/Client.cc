@@ -8729,11 +8729,8 @@ int Client::getdir(const char *relpath, list<string>& contents,
 		   const UserPerm& perms)
 {
   ldout(cct, 3) << "getdir(" << relpath << ")" << dendl;
-  {
-    std::lock_guard lock(client_lock);
-    tout(cct) << "getdir" << std::endl;
-    tout(cct) << relpath << std::endl;
-  }
+  tout(cct) << "getdir" << std::endl;
+  tout(cct) << relpath << std::endl;
 
   dir_result_t *d;
   int r = opendir(relpath, &d, perms);
