@@ -9,14 +9,19 @@
 #include "include/xlist.h"
 #include "mds/MDSMap.h"
 #include "mds/mdstypes.h"
+#include "MetaSessionRef.h"
 #include "messages/MClientCapRelease.h"
+#include "common/RefCountedObj.h"
 
 struct Cap;
+class Client;
 struct Inode;
 struct CapSnap;
 struct MetaRequest;
 
-struct MetaSession {
+struct MetaSession : public RefCountedObject {
+  Client *client;
+
   mds_rank_t mds_num;
   ConnectionRef con;
   version_t seq = 0;
@@ -56,8 +61,8 @@ struct MetaSession {
 
   ceph::ref_t<MClientCapRelease> release;
 
-  MetaSession(mds_rank_t mds_num, ConnectionRef con, const entity_addrvec_t& addrs)
-    : mds_num(mds_num), con(con), addrs(addrs) {
+  MetaSession(Client *c, mds_rank_t mds_num, ConnectionRef con, const entity_addrvec_t& addrs)
+    : client(c), mds_num(mds_num), con(con), addrs(addrs) {
   }
 
   const char *get_state_name() const;
