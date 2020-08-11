@@ -6217,13 +6217,6 @@ void Client::_unmount(bool abort)
     return mds_requests.empty();
   });
 
-  {
-    std::scoped_lock l(timer_lock);
-    if (tick_event)
-      timer.cancel_event(tick_event);
-    tick_event = 0;
-  }
-
   cwd.reset();
 
   // clean up any unclosed files
@@ -6303,6 +6296,13 @@ void Client::_unmount(bool abort)
   }
   ceph_assert(lru.lru_get_size() == 0);
   ceph_assert(inode_map.empty());
+
+  {
+    std::scoped_lock l(timer_lock);
+    if (tick_event)
+      timer.cancel_event(tick_event);
+    tick_event = 0;
+  }
 
   // stop tracing
   if (!cct->_conf->client_trace.empty()) {
