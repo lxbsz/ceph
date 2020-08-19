@@ -3192,9 +3192,10 @@ void Client::handle_lease(const MConstRef<MClientLease>& m)
   }
 }
 
-void Client::put_inode(Inode *in, int n)
+void Client::_put_inode(Inode *in, int n)
 {
   ldout(cct, 10) << __func__ << " on " << *in << dendl;
+
   int left = in->_put(n);
   if (left == 0) {
     // release any caps
@@ -3216,6 +3217,34 @@ void Client::put_inode(Inode *in, int n)
 
     delete in;
   }
+}
+
+void Client::delay_put_inodes(bool wakeup)
+{
+  ceph_assert(ceph_mutex_is_locked_by_me(client_lock));
+
+  std::multimap<Inode*,int> release;
+  {
+    std::scoped_lock dl(delay_lock);
+    release.swap(delay_release);
+    delay_release.clear();
+  }
+
+  for (auto &[in, cnt] : release)
+    _put_inode(in, cnt);
+
+  if (wakeup)
+    mount_cond.notify_all();
+}
+
+void Client::put_inode(Inode *in, int n)
+{
+  ldout(cct, 20) << __func__ << " on " << *in << " n = " << n << dendl;
+
+  std::scoped_lock dl(delay_lock);
+  delay_release.emplace(std::piecewise_construct,
+                        std::make_tuple(in),
+                        std::make_tuple(n));
 }
 
 void Client::close_dir(Dir *dir)
@@ -6433,12 +6462,15 @@ void Client::_unmount(bool abort)
   // empty lru cache
   trim_cache();
 
+  delay_put_inodes();
+
   while (lru.lru_get_size() > 0 ||
          !inode_map.empty()) {
     ldout(cct, 2) << "cache still has " << lru.lru_get_size()
             << "+" << inode_map.size() << " items"
 	    << ", waiting (for caps to release?)"
             << dendl;
+
     if (auto r = mount_cond.wait_for(lock, ceph::make_timespan(5));
 	r == std::cv_status::timeout) {
       dump_cache(NULL);
@@ -6567,6 +6599,7 @@ void Client::tick()
   if (!mount_aborted)
     collect_and_send_metrics();
 
+  delay_put_inodes(is_unmounting());
   trim_cache(true);
 
   if (blacklisted && (is_mounted() || is_unmounting()) &&
