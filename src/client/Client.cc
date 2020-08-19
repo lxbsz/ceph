@@ -330,11 +330,8 @@ Client::~Client()
 void Client::tear_down_cache()
 {
   // fd's
-  for (ceph::unordered_map<int, Fh*>::iterator it = fd_map.begin();
-       it != fd_map.end();
-       ++it) {
-    Fh *fh = it->second;
-    ldout(cct, 1) << __func__ << " forcing close of fh " << it->first << " ino " << fh->inode->ino << dendl;
+  for (auto &[fd, fh] : fd_map) {
+    ldout(cct, 1) << __func__ << " forcing close of fh " << fd << " ino " << fh->inode->ino << dendl;
     _release_fh(fh);
   }
   fd_map.clear();
@@ -9819,7 +9816,6 @@ int Client::_read_sync(Fh *f, uint64_t off, uint64_t len, bufferlist *bl,
 		      &onfinish);
     cl.unlock();
     int r = onfinish.wait();
-    cl.lock();
 
     // if we get ENOENT from OSD, assume 0 bytes returned
     if (r == -ENOENT)
@@ -9849,13 +9845,17 @@ int Client::_read_sync(Fh *f, uint64_t off, uint64_t len, bufferlist *bl,
 	read += some;
 	pos += some;
 	left -= some;
-	if (left == 0)
+	if (left == 0) {
+          cl.lock();
           goto out;
+	}
       }
 
       *checkeof = true;
+      cl.lock();
       goto out;
     }
+    cl.lock();
   }
 
 out:
@@ -9900,7 +9900,13 @@ int64_t Client::_preadv_pwritev_locked(Fh *fh, const struct iovec *iov,
 				   unsigned iovcnt, int64_t offset, bool write,
 				   bool clamp_to_int)
 {
+    ceph_assert(ceph_mutex_is_locked_by_me(client_lock));
+
 #if defined(__linux__) && defined(O_PATH)
+    /*
+     * The fh->flags won't change once set, so no need to
+     * make it under the client_lock.
+     */
     if (fh->flags & O_PATH)
         return -EBADF;
 #endif
@@ -9918,12 +9924,17 @@ int64_t Client::_preadv_pwritev_locked(Fh *fh, const struct iovec *iov,
       totallen = std::min(totallen, (loff_t)INT_MAX);
     }
     if (write) {
+        std::scoped_lock lock(client_lock);
         int64_t w = _write(fh, offset, totallen, NULL, iov, iovcnt);
         ldout(cct, 3) << "pwritev(" << fh << ", \"...\", " << totallen << ", " << offset << ") = " << w << dendl;
         return w;
     } else {
         bufferlist bl;
-        int64_t r = _read(fh, offset, totallen, &bl);
+        int64_t r;
+	{
+          std::scoped_lock lock(client_lock);
+          r = _read(fh, offset, totallen, &bl);
+	}
         ldout(cct, 3) << "preadv(" << fh << ", " <<  offset << ") = " << r << dendl;
         if (r <= 0)
           return r;
@@ -9931,15 +9942,15 @@ int64_t Client::_preadv_pwritev_locked(Fh *fh, const struct iovec *iov,
         auto iter = bl.cbegin();
         for (unsigned j = 0, resid = r; j < iovcnt && resid > 0; j++) {
                /*
-                * This piece of code aims to handle the case that bufferlist does not have enough data 
-                * to fill in the iov 
+                * This piece of code aims to handle the case that bufferlist
+		* does not have enough data to fill in the iov
                 */
                const auto round_size = std::min<unsigned>(resid, iov[j].iov_len);
                iter.copy(round_size, reinterpret_cast<char*>(iov[j].iov_base));
                resid -= round_size;
                /* iter is self-updating */
         }
-        return r;  
+        return r;
     }
 }
 
@@ -9952,11 +9963,19 @@ int Client::_preadv_pwritev(int fd, const struct iovec *iov, unsigned iovcnt, in
     tout(cct) << fd << std::endl;
     tout(cct) << offset << std::endl;
 
-    std::scoped_lock lock(client_lock);
-    Fh *fh = get_filehandle(fd);
-    if (!fh)
+    Fh *fh;
+    {
+      std::scoped_lock lock(client_lock);
+      Fh *fh = get_filehandle(fd);
+      if (!fh)
         return -EBADF;
-    return _preadv_pwritev_locked(fh, iov, iovcnt, offset, write, true);
+      fh->get();
+    }
+    int64_t ret = _preadv_pwritev_locked(fh, iov, iovcnt, offset, write, true);
+
+    std::scoped_lock lock(client_lock);
+    _put_fh(fh);
+    return ret;
 }
 
 int64_t Client::_write(Fh *f, int64_t offset, uint64_t size, const char *buf,
@@ -13831,7 +13850,6 @@ int Client::ll_read_block(Inode *in, uint64_t blockid,
 
   cl.unlock();
   int r = onfinish.wait();
-  cl.lock();
 
   if (r >= 0) {
       bl.begin().copy(bl.length(), buf);
@@ -13955,7 +13973,6 @@ int64_t Client::ll_writev(struct Fh *fh, const struct iovec *iov, int iovcnt, in
   if (!mref_reader.is_state_satisfied())
     return -ENOTCONN;
 
-  std::scoped_lock lock(client_lock);
   return _preadv_pwritev_locked(fh, iov, iovcnt, off, true, false);
 }
 
@@ -13965,7 +13982,6 @@ int64_t Client::ll_readv(struct Fh *fh, const struct iovec *iov, int iovcnt, int
   if (!mref_reader.is_state_satisfied())
     return -ENOTCONN;
 
-  std::scoped_lock lock(client_lock);
   return _preadv_pwritev_locked(fh, iov, iovcnt, off, false, false);
 }
 
