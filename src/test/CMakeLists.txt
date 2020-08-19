@@ -440,6 +440,12 @@ if(${WITH_CEPHFS})
   target_link_libraries(test_c_headers
     librados
     cephfs)
+
+  add_executable(mytest
+    mytest.c)
+  target_link_libraries(mytest
+    librados
+    cephfs)
 endif(${WITH_CEPHFS})
 
 if(HAVE_BLKID OR FREEBSD)
