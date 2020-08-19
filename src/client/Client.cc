@@ -4168,6 +4168,7 @@ bool Client::_flush(Inode *in, Context *onfinish)
 void Client::_flush_range(Inode *in, int64_t offset, uint64_t size)
 {
   ceph_assert(ceph_mutex_is_locked_by_me(client_lock));
+
   if (!in->oset.dirty_or_tx) {
     ldout(cct, 10) << " nothing to flush" << dendl;
     return;
@@ -5951,6 +5952,8 @@ int Client::authenticate()
 
 int Client::fetch_fsmap(bool user)
 {
+  ceph_assert(ceph_mutex_is_locked_by_me(client_lock));
+
   // Retrieve FSMap to enable looking up daemon addresses.  We need FSMap
   // rather than MDSMap because no one MDSMap contains all the daemons, and
   // a `tell` can address any daemon.
@@ -8566,7 +8569,7 @@ int Client::readdir_r_cb(dir_result_t *d, add_dirent_cb_t cb, void *p,
   if (!mref_reader.is_state_satisfied())
     return -ENOTCONN;
 
-  std::scoped_lock lock(client_lock);
+  std::unique_lock cl(client_lock);
 
   dir_result_t *dirp = static_cast<dir_result_t*>(d);
 
@@ -8603,9 +8606,9 @@ int Client::readdir_r_cb(dir_result_t *d, add_dirent_cb_t cb, void *p,
       _ll_get(inode);
     }
 
-    client_lock.unlock();
+    cl.unlock();
     r = cb(p, &de, &stx, next_off, inode);
-    client_lock.lock();
+    cl.lock();
     if (r < 0)
       return r;
 
@@ -8636,9 +8639,9 @@ int Client::readdir_r_cb(dir_result_t *d, add_dirent_cb_t cb, void *p,
       _ll_get(inode);
     }
 
-    client_lock.unlock();
+    cl.unlock();
     r = cb(p, &de, &stx, next_off, inode);
-    client_lock.lock();
+    cl.lock();
     if (r < 0)
       return r;
 
@@ -8703,9 +8706,9 @@ int Client::readdir_r_cb(dir_result_t *d, add_dirent_cb_t cb, void *p,
 	_ll_get(inode);
       }
 
-      client_lock.unlock();
+      cl.unlock();
       r = cb(p, &de, &stx, next_off, inode);  // _next_ offset
-      client_lock.lock();
+      cl.lock();
 
       ldout(cct, 15) << " de " << de.d_name << " off " << hex << next_off - 1 << dec
 		     << " = " << r << dendl;
@@ -9755,6 +9758,8 @@ int Client::_read_async(Fh *f, uint64_t off, uint64_t len, bufferlist *bl)
                  << " max_bytes=" << f->readahead.get_max_readahead_size()
                  << " max_periods=" << conf->client_readahead_max_periods << dendl;
 
+  std::unique_lock cl{client_lock, std::adopt_lock};
+
   // read (and possibly block)
   int r = 0;
   C_SaferCond onfinish("Client::_read_async flock");
@@ -9762,9 +9767,9 @@ int Client::_read_async(Fh *f, uint64_t off, uint64_t len, bufferlist *bl)
 			      off, len, bl, 0, &onfinish);
   if (r == 0) {
     get_cap_ref(in, CEPH_CAP_FILE_CACHE);
-    client_lock.unlock();
+    cl.unlock();
     r = onfinish.wait();
-    client_lock.lock();
+    cl.lock();
     put_cap_ref(in, CEPH_CAP_FILE_CACHE);
   }
 
@@ -9787,12 +9792,15 @@ int Client::_read_async(Fh *f, uint64_t off, uint64_t len, bufferlist *bl)
     }
   }
 
+  cl.release();
   return r;
 }
 
 int Client::_read_sync(Fh *f, uint64_t off, uint64_t len, bufferlist *bl,
 		       bool *checkeof)
 {
+  std::unique_lock cl{client_lock, std::adopt_lock};
+
   Inode *in = f->inode.get();
   uint64_t pos = off;
   int left = len;
@@ -9809,15 +9817,17 @@ int Client::_read_sync(Fh *f, uint64_t off, uint64_t len, bufferlist *bl,
 		      pos, left, &tbl, 0,
 		      in->truncate_size, in->truncate_seq,
 		      &onfinish);
-    client_lock.unlock();
+    cl.unlock();
     int r = onfinish.wait();
-    client_lock.lock();
+    cl.lock();
 
     // if we get ENOENT from OSD, assume 0 bytes returned
     if (r == -ENOENT)
       r = 0;
-    if (r < 0)
+    if (r < 0) {
+      cl.release();
       return r;
+    }
     if (tbl.length()) {
       r = tbl.length();
 
@@ -9840,13 +9850,16 @@ int Client::_read_sync(Fh *f, uint64_t off, uint64_t len, bufferlist *bl,
 	pos += some;
 	left -= some;
 	if (left == 0)
-	  return read;
+          goto out;
       }
 
       *checkeof = true;
-      return read;
+      goto out;
     }
   }
+
+out:
+  cl.release();
   return read;
 }
 
@@ -10049,7 +10062,8 @@ int64_t Client::_write(Fh *f, int64_t offset, uint64_t size, const char *buf,
   ldout(cct, 10) << " snaprealm " << *in->snaprealm << dendl;
 
   std::unique_ptr<C_SaferCond> onuninline = nullptr;
-  
+  std::unique_lock cl{client_lock, std::adopt_lock};
+
   if (in->inline_version < CEPH_INLINE_NONE) {
     if (endoff > cct->_conf->client_max_inline_size ||
         endoff > CEPH_INLINE_MAX_SIZE ||
@@ -10114,9 +10128,9 @@ int64_t Client::_write(Fh *f, int64_t offset, uint64_t size, const char *buf,
 		       offset, size, bl, ceph::real_clock::now(), 0,
 		       in->truncate_size, in->truncate_seq,
 		       &onfinish);
-    client_lock.unlock();
+    cl.unlock();
     r = onfinish.wait();
-    client_lock.lock();
+    cl.lock();
     put_cap_ref(in, CEPH_CAP_FILE_BUFFER);
     if (r < 0)
       goto done;
@@ -10161,9 +10175,9 @@ success:
 done:
 
   if (nullptr != onuninline) {
-    client_lock.unlock();
+    cl.unlock();
     int uninline_ret = onuninline->wait();
-    client_lock.lock();
+    cl.lock();
 
     if (uninline_ret >= 0 || uninline_ret == -ECANCELED) {
       in->inline_data.clear();
@@ -10175,6 +10189,7 @@ done:
   }
 
   put_cap_ref(in, CEPH_CAP_FILE_WR);
+  cl.release();
   return r;
 }
 
@@ -10261,6 +10276,8 @@ int Client::fsync(int fd, bool syncdataonly)
 
 int Client::_fsync(Inode *in, bool syncdataonly)
 {
+  std::unique_lock cl{client_lock, std::adopt_lock};
+
   int r = 0;
   std::unique_ptr<C_SaferCond> object_cacher_completion = nullptr;
   ceph_tid_t flush_tid = 0;
@@ -10286,8 +10303,6 @@ int Client::_fsync(Inode *in, bool syncdataonly)
   if (!syncdataonly && !in->unsafe_ops.empty()) {
     flush_mdlog_sync();
 
-    std::unique_lock cl{client_lock, std::adopt_lock};
-
     MetaRequestRef req = in->unsafe_ops.back();
     cl.unlock();
     std::scoped_lock rl{req->request_lock};
@@ -10296,14 +10311,13 @@ int Client::_fsync(Inode *in, bool syncdataonly)
 
     wait_on_list(req->waitfor_safe, req.get());
     cl.lock();
-    cl.release();
   }
 
   if (nullptr != object_cacher_completion) { // wait on a real reply instead of guessing
-    client_lock.unlock();
+    cl.unlock();
     ldout(cct, 15) << "waiting on data to flush" << dendl;
     r = object_cacher_completion->wait();
-    client_lock.lock();
+    cl.lock();
     ldout(cct, 15) << "got " << r << " from flush writeback" << dendl;
   } else {
     // FIXME: this can starve
@@ -10328,6 +10342,7 @@ int Client::_fsync(Inode *in, bool syncdataonly)
   lat -= start;
   logger->tinc(l_c_fsync, lat);
 
+  cl.release();
   return r;
 }
 
@@ -13803,7 +13818,7 @@ int Client::ll_read_block(Inode *in, uint64_t blockid,
   C_SaferCond onfinish;
   bufferlist bl;
 
-  std::scoped_lock lock(client_lock);
+  std::unique_lock cl(client_lock);
 
   objecter->read(oid,
 		 object_locator_t(layout->pool_id),
@@ -13814,9 +13829,9 @@ int Client::ll_read_block(Inode *in, uint64_t blockid,
 		 CEPH_OSD_FLAG_READ,
                  &onfinish);
 
-  client_lock.unlock();
+  cl.unlock();
   int r = onfinish.wait();
-  client_lock.lock();
+  cl.lock();
 
   if (r >= 0) {
       bl.begin().copy(bl.length(), buf);
@@ -13863,7 +13878,7 @@ int Client::ll_write_block(Inode *in, uint64_t blockid,
   fakesnap.seq = snapseq;
 
   /* lock just in time */
-  client_lock.lock();
+  std::scoped_lock lock(client_lock);
   objecter->write(oid,
 		  object_locator_t(layout->pool_id),
 		  offset,
@@ -13874,7 +13889,6 @@ int Client::ll_write_block(Inode *in, uint64_t blockid,
 		  0,
 		  onsafe.get());
 
-  client_lock.unlock();
   if (nullptr != onsafe) {
     r = onsafe->wait();
   }
@@ -14040,6 +14054,8 @@ int Client::_fallocate(Fh *fh, int mode, int64_t offset, int64_t length)
   if (r < 0)
     return r;
 
+  std::unique_lock cl{client_lock, std::adopt_lock};
+
   std::unique_ptr<C_SaferCond> onuninline = nullptr;
   if (mode & FALLOC_FL_PUNCH_HOLE) {
     if (in->inline_version < CEPH_INLINE_NONE &&
@@ -14085,9 +14101,9 @@ int Client::_fallocate(Fh *fh, int mode, int64_t offset, int64_t length)
       in->change_attr++;
       in->mark_caps_dirty(CEPH_CAP_FILE_WR);
 
-      client_lock.unlock();
+      cl.unlock();
       onfinish.wait();
-      client_lock.lock();
+      cl.lock();
       put_cap_ref(in, CEPH_CAP_FILE_BUFFER);
     }
   } else if (!(mode & FALLOC_FL_KEEP_SIZE)) {
@@ -14107,9 +14123,9 @@ int Client::_fallocate(Fh *fh, int mode, int64_t offset, int64_t length)
   }
 
   if (nullptr != onuninline) {
-    client_lock.unlock();
+    cl.unlock();
     int ret = onuninline->wait();
-    client_lock.lock();
+    cl.lock();
 
     if (ret >= 0 || ret == -ECANCELED) {
       in->inline_data.clear();
@@ -14121,6 +14137,7 @@ int Client::_fallocate(Fh *fh, int mode, int64_t offset, int64_t length)
   }
 
   put_cap_ref(in, CEPH_CAP_FILE_WR);
+  cl.release();
   return r;
 }
 #else
@@ -14714,6 +14731,8 @@ enum {
 
 int Client::check_pool_perm(Inode *in, int need)
 {
+  ceph_assert(ceph_mutex_is_locked_by_me(client_lock));
+
   if (!cct->_conf->client_check_pool_perm)
     return 0;
 
