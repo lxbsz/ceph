@@ -35,11 +35,11 @@
 #include "cephfs_features.h"
 #include "SessionMap.h"
 #include "messages/MClientReply.h"
+#include "osdc/Objecter.h"
 
 class CDentry;
 class MDCache;
-
-struct ObjectOperation;
+struct CommitOperation;
 
 std::ostream& operator<<(std::ostream& out, const class CDir& dir);
 
@@ -58,6 +58,26 @@ public:
     static mempool::mds_co::pool_allocator<fnode_t> allocator;
     return std::allocate_shared<fnode_t>(allocator, std::forward<Args>(args)...);
   }
+
+  struct dentry_commit_items {
+    snapid_t first;
+    bool is_remote = false;
+
+    inodeno_t ino;
+    unsigned char d_type;
+
+    bool snaprealm = false;
+    sr_t srnode;
+
+    mempool::mds_co::string symlink = "";
+    uint64_t features;
+    fragtree_t dirfragtree;
+    CInode::inode_const_ptr inode;
+    CInode::xattr_map_const_ptr xattrs;
+    CInode::old_inode_map_const_ptr old_inodes;
+    snapid_t oldest_snap;
+    damage_flags_t damage_flags;
+  };
 
   // -- freezing --
   struct freeze_tree_state_t {
@@ -661,6 +681,8 @@ protected:
   friend class C_IO_Dir_OMAP_Fetched;
   friend class C_IO_Dir_OMAP_FetchedMore;
   friend class C_IO_Dir_Committed;
+  friend class C_IO_Dir_Commit_Ops;
+  friend struct CommitOperation;
 
   void _omap_fetch(MDSContext *fin, const std::set<dentry_key_t>& keys);
   void _omap_fetch_more(
@@ -691,8 +713,10 @@ protected:
 
   // -- commit --
   void _commit(version_t want, int op_prio);
+  void _omap_commit_ops(int r, int op_prio, version_t version, set<string> &to_remove,
+                        map<string, dentry_commit_items> &to_set);
   void _omap_commit(int op_prio);
-  void _encode_dentry(CDentry *dn, ceph::buffer::list& bl, const std::set<snapid_t> *snaps);
+  void _parse_dentry(CDentry *dn, dentry_commit_items &item, const set<snapid_t> *snaps);
   void _committed(int r, version_t v);
 
   static fnode_const_ptr empty_fnode;
