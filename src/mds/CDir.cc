@@ -2160,9 +2160,50 @@ public:
     dir->_committed(r, version);
   }
   void print(ostream& out) const override {
+    out << "dirfrag_committed(" << dir->dirfrag() << ")";
+  }
+};
+
+class C_IO_Dir_Commit_Ops : public CDirIOContext {
+  version_t version;
+  std::vector<CommitOperation> ops;
+public:
+  C_IO_Dir_Commit_Ops(CDir *d, version_t v, std::vector<CommitOperation> &vec)
+	  : CDirIOContext(d), version(v) { ops.swap(vec); }
+  void finish(int r) override {
+    dir->_omap_commit_ops(r, version, ops);
+  }
+  void print(ostream& out) const override {
     out << "dirfrag_commit(" << dir->dirfrag() << ")";
   }
 };
+
+void CDir::_omap_commit_ops(int r, version_t version,
+                            std::vector<CommitOperation> &ops)
+{
+  dout(10) << __func__ << dendl;
+
+  if (r < 0) {
+    mdcache->mds->handle_write_error(r);
+    return;
+  }
+
+  C_GatherBuilder gather(g_ceph_context,
+                         new C_OnFinisher(new C_IO_Dir_Committed(this, version),
+			 mdcache->mds->finisher));
+
+  SnapContext snapc;
+  object_t oid = get_ondisk_object();
+  object_locator_t oloc(mdcache->mds->mdsmap->get_metadata_pool());
+
+  for (auto &cop : ops) {
+      cop.update();
+      mdcache->mds->objecter->mutate(oid, oloc, cop, snapc,
+				     ceph::real_clock::now(),
+				     0, gather.new_sub());
+  }
+  gather.activate();
+}
 
 /**
  * Flush out the modified dentries in this dir. Keep the bufferlist
@@ -2194,15 +2235,6 @@ void CDir::_omap_commit(int op_prio)
   set<string> to_remove;
   map<string, bufferlist> to_set;
 
-  C_GatherBuilder gather(g_ceph_context,
-			 new C_OnFinisher(new C_IO_Dir_Committed(this,
-								 get_version()),
-					  mdcache->mds->finisher));
-
-  SnapContext snapc;
-  object_t oid = get_ondisk_object();
-  object_locator_t oloc(mdcache->mds->mdsmap->get_metadata_pool());
-
   if (!stale_items.empty()) {
     for (const auto &p : stale_items) {
       to_remove.insert(std::string(p));
@@ -2210,6 +2242,14 @@ void CDir::_omap_commit(int op_prio)
     }
     stale_items.clear();
   }
+
+  std::vector<CommitOperation> ops_vec;
+
+  auto create_op = [&](bool with_header=false) {
+      bool nostat = !is_new() && !state_test(CDir::STATE_FRAGMENTING);
+      ops_vec.emplace_back(op_prio, nostat, to_remove, to_set, with_header ? fnode : nullptr);
+      write_size = 0;
+  };
 
   auto write_one = [&](CDentry *dn) {
     string key;
@@ -2235,27 +2275,8 @@ void CDir::_omap_commit(int op_prio)
       to_set[key].swap(dnbl);
     }
 
-    if (write_size >= max_write_size) {
-      ObjectOperation op;
-      op.priority = op_prio;
-
-      // don't create new dirfrag blindly
-      if (!is_new() && !state_test(CDir::STATE_FRAGMENTING))
-	op.stat(nullptr, nullptr, nullptr);
-
-      if (!to_set.empty())
-	op.omap_set(to_set);
-      if (!to_remove.empty())
-	op.omap_rm_keys(to_remove);
-
-      mdcache->mds->objecter->mutate(oid, oloc, op, snapc,
-				   ceph::real_clock::now(),
-				   0, gather.new_sub());
-
-      write_size = 0;
-      to_set.clear();
-      to_remove.clear();
-    }
+    if (write_size >= max_write_size)
+      create_op();
   };
 
   if (state_test(CDir::STATE_FRAGMENTING)) {
@@ -2275,35 +2296,9 @@ void CDir::_omap_commit(int op_prio)
     }
   }
 
-  ObjectOperation op;
-  op.priority = op_prio;
-
-  // don't create new dirfrag blindly
-  if (!is_new() && !state_test(CDir::STATE_FRAGMENTING))
-    op.stat(nullptr, nullptr, nullptr);
-
-  /*
-   * save the header at the last moment.. If we were to send it off before other
-   * updates, but die before sending them all, we'd think that the on-disk state
-   * was fully committed even though it wasn't! However, since the messages are
-   * strictly ordered between the MDS and the OSD, and since messages to a given
-   * PG are strictly ordered, if we simply send the message containing the header
-   * off last, we cannot get our header into an incorrect state.
-   */
-  bufferlist header;
-  encode(*fnode, header);
-  op.omap_set_header(header);
-
-  if (!to_set.empty())
-    op.omap_set(to_set);
-  if (!to_remove.empty())
-    op.omap_rm_keys(to_remove);
-
-  mdcache->mds->objecter->mutate(oid, oloc, op, snapc,
-			       ceph::real_clock::now(),
-			       0, gather.new_sub());
-
-  gather.activate();
+  create_op(true);
+  mdcache->mds->finisher->queue(new C_IO_Dir_Commit_Ops(this, get_version(),
+                                                        ops_vec));
 }
 
 void CDir::_encode_dentry(CDentry *dn, bufferlist& bl,

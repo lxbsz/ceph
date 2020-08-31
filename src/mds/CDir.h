@@ -35,11 +35,11 @@
 #include "cephfs_features.h"
 #include "SessionMap.h"
 #include "messages/MClientReply.h"
+#include "osdc/Objecter.h"
 
 class CDentry;
 class MDCache;
-
-struct ObjectOperation;
+struct CommitOperation;
 
 std::ostream& operator<<(std::ostream& out, const class CDir& dir);
 
@@ -661,6 +661,8 @@ protected:
   friend class C_IO_Dir_OMAP_Fetched;
   friend class C_IO_Dir_OMAP_FetchedMore;
   friend class C_IO_Dir_Committed;
+  friend class C_IO_Dir_Commit_Ops;
+  friend struct CommitOperation;
 
   void _omap_fetch(MDSContext *fin, const std::set<dentry_key_t>& keys);
   void _omap_fetch_more(
@@ -691,6 +693,7 @@ protected:
 
   // -- commit --
   void _commit(version_t want, int op_prio);
+  void _omap_commit_ops(int r, version_t version, std::vector<CommitOperation> &ops);
   void _omap_commit(int op_prio);
   void _encode_dentry(CDentry *dn, ceph::buffer::list& bl, const std::set<snapid_t> *snaps);
   void _committed(int r, version_t v);
@@ -800,6 +803,50 @@ private:
    *             <parent,mds2>       subtree_root
    */
   mds_authority_t dir_auth;
+};
+
+struct CommitOperation : public ObjectOperation {
+public:
+  CommitOperation(int op_prio, bool nostat, set<string> &rm, map<string,
+                  bufferlist> &set, CDir::fnode_const_ptr fnode=nullptr) {
+      priority = op_prio;
+      // don't create new dirfrag blindly
+      if (nostat)
+        stat(nullptr, nullptr, nullptr);
+
+      /*
+       * save the header at the last moment.. If we were to send it off before
+       * other updates, but die before sending them all, we'd think that the
+       * on-disk state was fully committed even though it wasn't! However, since
+       * the messages are strictly ordered between the MDS and the OSD, and
+       * since messages to a given PG are strictly ordered, if we simply send
+       * the message containing the header off last, we cannot get our header
+       * into an incorrect state.
+       */
+      if (fnode) {
+        bufferlist header;
+        encode(*fnode, header);
+        omap_set_header(header);
+      }
+
+      if (!set.empty())
+	_to_set.swap(set);
+      if (!rm.empty())
+	_to_remove.swap(rm);
+  }
+
+  void update() {
+    if (!_to_set.empty())
+      omap_set(_to_set);
+
+    if (!_to_remove.empty())
+      omap_rm_keys(_to_remove);
+  }
+
+private:
+  // for defer encoding
+  set<string> _to_remove;
+  map<string, bufferlist> _to_set;
 };
 
 #endif
