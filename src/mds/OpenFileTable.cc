@@ -342,8 +342,6 @@ void OpenFileTable::commit(MDSContext *c, uint64_t log_seq, int op_prio)
 
   omap_version++;
 
-  C_GatherBuilder gather(g_ceph_context);
-
   SnapContext snapc;
   object_locator_t oloc(mds->mdsmap->get_metadata_pool());
 
@@ -359,10 +357,14 @@ void OpenFileTable::commit(MDSContext *c, uint64_t log_seq, int op_prio)
   std::vector<omap_update_ctl> omap_updates(omap_num_objs);
 
   using ceph::encode;
-  auto journal_func = [&](unsigned idx) {
+  std::map<unsigned, std::vector<ObjectOperation> > ops_map;
+
+  auto create_journal_op_func = [&](unsigned idx) {
     auto& ctl = omap_updates.at(idx);
 
-    ObjectOperation op;
+    auto& op_vec = ops_map[idx];
+    op_vec.resize(op_vec.size() + 1);
+    ObjectOperation& op = op_vec.back();
     op.priority = op_prio;
 
     if (ctl.clear) {
@@ -393,10 +395,6 @@ void OpenFileTable::commit(MDSContext *c, uint64_t log_seq, int op_prio)
     tmp_map[key].swap(bl);
     op.omap_set(tmp_map);
 
-    object_t oid = get_object_name(idx);
-    mds->objecter->mutate(oid, oloc, op, snapc, ceph::real_clock::now(), 0,
-			  gather.new_sub());
-
 #ifdef HAVE_STDLIB_MAP_SPLICING
     ctl.journaled_update.merge(ctl.to_update);
     ctl.journaled_remove.merge(ctl.to_remove);
@@ -408,9 +406,8 @@ void OpenFileTable::commit(MDSContext *c, uint64_t log_seq, int op_prio)
 #endif
     ctl.to_update.clear();
     ctl.to_remove.clear();
+    ctl.write_size = 0;
   };
-
-  std::map<unsigned, std::vector<ObjectOperation> > ops_map;
 
   auto create_op_func = [&](unsigned idx, bool update_header) {
     auto& ctl = omap_updates.at(idx);
@@ -443,16 +440,8 @@ void OpenFileTable::commit(MDSContext *c, uint64_t log_seq, int op_prio)
   };
 
   auto submit_ops_func = [&]() {
-    gather.set_finisher(new C_OnFinisher(new C_IO_OFT_Save(this, log_seq, c),
-					 mds->finisher));
-    for (auto& it : ops_map) {
-      object_t oid = get_object_name(it.first);
-      for (auto& op : it.second) {
-	mds->objecter->mutate(oid, oloc, op, snapc, ceph::real_clock::now(),
-			      0, gather.new_sub());
-      }
-    }
-    gather.activate();
+    ceph_assert(!ops_map.empty());
+    mds->finisher->queue(new C_IO_OFT_Journal(this, log_seq, c, ops_map));
   };
 
   bool first_commit = !loaded_anchor_map.empty();
@@ -532,8 +521,7 @@ void OpenFileTable::commit(MDSContext *c, uint64_t log_seq, int op_prio)
     }
 
     if (ctl.write_size >= max_write_size) {
-      journal_func(omap_idx);
-      ctl.write_size = 0;
+      create_journal_op_func(omap_idx);
     }
   }
 
@@ -554,8 +542,7 @@ void OpenFileTable::commit(MDSContext *c, uint64_t log_seq, int op_prio)
       ctl.to_remove.emplace(key);
 
       if (ctl.write_size >= max_write_size) {
-	journal_func(omap_idx);
-	ctl.write_size = 0;
+        create_journal_op_func(omap_idx);
       }
     }
     loaded_anchor_map.clear();
@@ -587,7 +574,6 @@ void OpenFileTable::commit(MDSContext *c, uint64_t log_seq, int op_prio)
     if (!journaled && old_num_objs == omap_num_objs &&
 	objs_to_write.size() <= 1) {
       ceph_assert(journal_state == JOURNAL_NONE);
-      ceph_assert(!gather.has_subs());
 
       unsigned omap_idx = objs_to_write.empty() ? 0 : objs_to_write.front();
       create_op_func(omap_idx, true);
@@ -599,18 +585,15 @@ void OpenFileTable::commit(MDSContext *c, uint64_t log_seq, int op_prio)
   for (unsigned omap_idx = 0; omap_idx < omap_updates.size(); omap_idx++) {
     auto& ctl = omap_updates[omap_idx];
     if (ctl.write_size > 0) {
-      journal_func(omap_idx);
-      ctl.write_size = 0;
+      create_journal_op_func(omap_idx);
     }
   }
 
   if (journal_state == JOURNAL_START) {
-    ceph_assert(gather.has_subs());
     journal_state = JOURNAL_FINISH;
   } else {
     // only object count changes
     ceph_assert(journal_state == JOURNAL_NONE);
-    ceph_assert(!gather.has_subs());
   }
 
   uint64_t total_updates = 0;
@@ -658,14 +641,7 @@ void OpenFileTable::commit(MDSContext *c, uint64_t log_seq, int op_prio)
       create_op_func(omap_idx, first);
   }
 
-  ceph_assert(!ops_map.empty());
-  if (journal_state == JOURNAL_FINISH) {
-    gather.set_finisher(new C_OnFinisher(new C_IO_OFT_Journal(this, log_seq, c, ops_map),
-					 mds->finisher));
-    gather.activate();
-  } else {
-    submit_ops_func();
-  }
+  submit_ops_func();
   logger->set(l_oft_omap_total_objs, omap_num_objs);
   logger->set(l_oft_omap_total_kv_pairs, total_items);
   logger->inc(l_oft_omap_total_updates, total_updates);
