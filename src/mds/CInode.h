@@ -42,6 +42,7 @@
 #include "Mutation.h"
 
 #include "messages/MClientCaps.h"
+#include "osdc/Objecter.h"
 
 #define dout_context g_ceph_context
 
@@ -761,6 +762,8 @@ class CInode : public MDSCacheObject, public InodeStoreBase, public Counter<CIno
   void fetch(MDSContext *fin);
   void _fetched(ceph::buffer::list& bl, ceph::buffer::list& bl2, Context *fin);  
 
+  void _commit_ops(int r, version_t version, MDSContext *fin,
+                   std::map<ObjectOperation, object_locator_t> &ops_map);
   void build_backtrace(int64_t pool, inode_backtrace_t& bt);
   void store_backtrace(MDSContext *fin, int op_prio=-1);
   void _stored_backtrace(int r, version_t v, Context *fin);

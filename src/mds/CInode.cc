@@ -1330,6 +1330,52 @@ struct C_IO_Inode_StoredBacktrace : public CInodeIOContext {
   }
 };
 
+struct C_IO_Inode_CommitBacktrace : public CInodeIOContext {
+  version_t version;
+  MDSContext *fin;
+  std::map<ObjectOperation, object_locator_t> ops_map;
+  C_IO_Inode_CommitBacktrace(CInode *i, version_t v, MDSContext *f,
+                             std::map<ObjectOperation, object_locator_t> &ops)
+    : CInodeIOContext(i), version(v), fin(f) {
+    ops_map.swap(ops);
+  }
+  void finish(int r) override {
+    in->_commit_ops(r, version, fin, ops_map);
+  }
+  void print(ostream& out) const override {
+    out << "commit_ops(" << in->ino() << ")";
+  }
+};
+
+void CInode::_commit_ops(int r, version_t version, MDSContext *fin,
+                         std::map<ObjectOperation, object_locator_t> &ops_map)
+{
+  dout(10) << __func__ << dendl;
+
+  if (r < 0) {
+    mdcache->mds->handle_write_error(r);
+    return;
+  }
+
+  C_GatherBuilder gather(g_ceph_context,
+                         new C_OnFinisher(new C_IO_Inode_StoredBacktrace(this,
+                                                                         version,
+                                                                         fin),
+                         mdcache->mds->finisher));
+
+  SnapContext snapc;
+  object_t oid = get_object_name(ino(), frag_t(), "");
+
+  SnapContext snapc;
+  object_t oid = get_ondisk_object();
+  for (auto &[op, oloc] : ops) {
+      mdcache->mds->objecter->mutate(oid, oloc, op, snapc,
+				     ceph::real_clock::now(),
+				     0, gather.new_sub());
+  }
+  gather.activate();
+}
+
 void CInode::store_backtrace(MDSContext *fin, int op_prio)
 {
   dout(10) << __func__ << " on " << *this << dendl;
@@ -1339,6 +1385,15 @@ void CInode::store_backtrace(MDSContext *fin, int op_prio)
     op_prio = CEPH_MSG_PRIO_DEFAULT;
 
   auth_pin(this);
+
+  std::map<ObjectOperation, object_locator_t> ops_map;
+
+  auto submit_ops = [&]() {
+    auto version = get_inode()->backtrace_version;
+    mdcache->mds->finisher->queue(new C_IO_Inode_CommitBacktrace(this, version,
+                                                                 fin, ops_map),
+                                  mdcache->mds->finisher);
+  };
 
   const int64_t pool = get_backtrace_pool();
   inode_backtrace_t bt;
@@ -1355,26 +1410,14 @@ void CInode::store_backtrace(MDSContext *fin, int op_prio)
   bufferlist layout_bl;
   encode(get_inode()->layout, layout_bl, mdcache->mds->mdsmap->get_up_features());
   op.setxattr("layout", layout_bl);
-
-  SnapContext snapc;
-  object_t oid = get_object_name(ino(), frag_t(), "");
   object_locator_t oloc(pool);
-  Context *fin2 = new C_OnFinisher(
-    new C_IO_Inode_StoredBacktrace(this, get_inode()->backtrace_version, fin),
-    mdcache->mds->finisher);
+  ops_map.emplace_back(op, oloc);
 
   if (!state_test(STATE_DIRTYPOOL) || get_inode()->old_pools.empty()) {
     dout(20) << __func__ << ": no dirtypool or no old pools" << dendl;
-    mdcache->mds->objecter->mutate(oid, oloc, op, snapc,
-				   ceph::real_clock::now(),
-				   0, fin2);
+    submit_ops();
     return;
   }
-
-  C_GatherBuilder gather(g_ceph_context, fin2);
-  mdcache->mds->objecter->mutate(oid, oloc, op, snapc,
-				 ceph::real_clock::now(),
-				 0, gather.new_sub());
 
   // In the case where DIRTYPOOL is set, we update all old pools backtraces
   // such that anyone reading them will see the new pool ID in
@@ -1391,11 +1434,10 @@ void CInode::store_backtrace(MDSContext *fin, int op_prio)
     op.setxattr("parent", parent_bl);
 
     object_locator_t oloc(p);
-    mdcache->mds->objecter->mutate(oid, oloc, op, snapc,
-				   ceph::real_clock::now(),
-				   0, gather.new_sub());
+    ops_map.emplace_back(op, oloc);
   }
-  gather.activate();
+
+  submit_ops();
 }
 
 void CInode::_stored_backtrace(int r, version_t v, Context *fin)
