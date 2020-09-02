@@ -59,6 +59,26 @@ public:
     return std::allocate_shared<fnode_t>(allocator, std::forward<Args>(args)...);
   }
 
+  struct dentry_commit_items {
+    snapid_t first;
+    bool is_remote = false;
+
+    inodeno_t ino;
+    unsigned char d_type;
+
+    bool snaprealm = false;
+    sr_t srnode;
+
+    mempool::mds_co::string symlink = "";
+    uint64_t features;
+    fragtree_t dirfragtree;
+    CInode::inode_const_ptr inode;
+    CInode::xattr_map_const_ptr xattrs;
+    CInode::old_inode_map_const_ptr old_inodes;
+    snapid_t oldest_snap;
+    damage_flags_t damage_flags;
+  };
+
   // -- freezing --
   struct freeze_tree_state_t {
     CDir *dir; // freezing/frozen tree root
@@ -693,9 +713,10 @@ protected:
 
   // -- commit --
   void _commit(version_t want, int op_prio);
-  void _omap_commit_ops(int r, version_t version, std::vector<CommitOperation> &ops);
+  void _omap_commit_ops(int r, int op_prio, version_t version, set<string> &to_remove,
+                        map<string, dentry_commit_items> &to_set);
   void _omap_commit(int op_prio);
-  void _encode_dentry(CDentry *dn, ceph::buffer::list& bl, const std::set<snapid_t> *snaps);
+  void _parse_dentry(CDentry *dn, dentry_commit_items &item, const set<snapid_t> *snaps);
   void _committed(int r, version_t v);
 
   static fnode_const_ptr empty_fnode;
@@ -803,50 +824,6 @@ private:
    *             <parent,mds2>       subtree_root
    */
   mds_authority_t dir_auth;
-};
-
-struct CommitOperation : public ObjectOperation {
-public:
-  CommitOperation(int op_prio, bool nostat, set<string> &rm, map<string,
-                  bufferlist> &set, CDir::fnode_const_ptr fnode=nullptr) {
-      priority = op_prio;
-      // don't create new dirfrag blindly
-      if (nostat)
-        stat(nullptr, nullptr, nullptr);
-
-      /*
-       * save the header at the last moment.. If we were to send it off before
-       * other updates, but die before sending them all, we'd think that the
-       * on-disk state was fully committed even though it wasn't! However, since
-       * the messages are strictly ordered between the MDS and the OSD, and
-       * since messages to a given PG are strictly ordered, if we simply send
-       * the message containing the header off last, we cannot get our header
-       * into an incorrect state.
-       */
-      if (fnode) {
-        bufferlist header;
-        encode(*fnode, header);
-        omap_set_header(header);
-      }
-
-      if (!set.empty())
-	_to_set.swap(set);
-      if (!rm.empty())
-	_to_remove.swap(rm);
-  }
-
-  void update() {
-    if (!_to_set.empty())
-      omap_set(_to_set);
-
-    if (!_to_remove.empty())
-      omap_rm_keys(_to_remove);
-  }
-
-private:
-  // for defer encoding
-  set<string> _to_remove;
-  map<string, bufferlist> _to_set;
 };
 
 #endif
