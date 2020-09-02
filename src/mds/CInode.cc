@@ -1330,6 +1330,51 @@ struct C_IO_Inode_StoredBacktrace : public CInodeIOContext {
   }
 };
 
+struct C_IO_Inode_CommitBacktrace : public CInodeIOContext {
+  version_t version;
+  MDSContext *fin;
+  std::vector<CInodeCommitOperation> ops_vec;
+  C_IO_Inode_CommitBacktrace(CInode *i, version_t v, MDSContext *f,
+                             std::vector<CInodeCommitOperation> &ops)
+    : CInodeIOContext(i), version(v), fin(f) {
+    ops_vec.swap(ops);
+  }
+  void finish(int r) override {
+    in->_commit_ops(r, version, fin, ops_vec);
+  }
+  void print(ostream& out) const override {
+    out << "commit_ops(" << in->ino() << ")";
+  }
+};
+
+void CInode::_commit_ops(int r, version_t version, MDSContext *fin,
+                         std::vector<CInodeCommitOperation> &ops_vec)
+{
+  dout(10) << __func__ << dendl;
+
+  if (r < 0) {
+    mdcache->mds->handle_write_error(r);
+    return;
+  }
+
+  C_GatherBuilder gather(g_ceph_context,
+                         new C_OnFinisher(new C_IO_Inode_StoredBacktrace(this,
+                                                                         version,
+                                                                         fin),
+                         mdcache->mds->finisher));
+
+  SnapContext snapc;
+  object_t oid = get_object_name(ino(), frag_t(), "");
+
+  for (auto &op : ops_vec) {
+    op.update();
+    mdcache->mds->objecter->mutate(oid, op._oloc, op, snapc,
+                                   ceph::real_clock::now(),
+                                   0, gather.new_sub());
+  }
+  gather.activate();
+}
+
 void CInode::store_backtrace(MDSContext *fin, int op_prio)
 {
   dout(10) << __func__ << " on " << *this << dendl;
@@ -1340,41 +1385,29 @@ void CInode::store_backtrace(MDSContext *fin, int op_prio)
 
   auth_pin(this);
 
+  std::vector<CInodeCommitOperation> ops_vec;
+
+  auto submit_ops = [&]() {
+    auto version = get_inode()->backtrace_version;
+    mdcache->mds->finisher->queue(new C_IO_Inode_CommitBacktrace(this, version,
+                                                                 fin, ops_vec));
+  };
+
   const int64_t pool = get_backtrace_pool();
   inode_backtrace_t bt;
   build_backtrace(pool, bt);
   bufferlist parent_bl;
   using ceph::encode;
   encode(bt, parent_bl);
-
-  ObjectOperation op;
-  op.priority = op_prio;
-  op.create(false);
-  op.setxattr("parent", parent_bl);
-
-  bufferlist layout_bl;
-  encode(get_inode()->layout, layout_bl, mdcache->mds->mdsmap->get_up_features());
-  op.setxattr("layout", layout_bl);
-
-  SnapContext snapc;
-  object_t oid = get_object_name(ino(), frag_t(), "");
   object_locator_t oloc(pool);
-  Context *fin2 = new C_OnFinisher(
-    new C_IO_Inode_StoredBacktrace(this, get_inode()->backtrace_version, fin),
-    mdcache->mds->finisher);
+  ops_vec.emplace_back(op_prio, oloc, parent_bl, get_inode()->layout,
+                       mdcache->mds->mdsmap->get_up_features());
 
   if (!state_test(STATE_DIRTYPOOL) || get_inode()->old_pools.empty()) {
     dout(20) << __func__ << ": no dirtypool or no old pools" << dendl;
-    mdcache->mds->objecter->mutate(oid, oloc, op, snapc,
-				   ceph::real_clock::now(),
-				   0, fin2);
+    submit_ops();
     return;
   }
-
-  C_GatherBuilder gather(g_ceph_context, fin2);
-  mdcache->mds->objecter->mutate(oid, oloc, op, snapc,
-				 ceph::real_clock::now(),
-				 0, gather.new_sub());
 
   // In the case where DIRTYPOOL is set, we update all old pools backtraces
   // such that anyone reading them will see the new pool ID in
@@ -1385,17 +1418,11 @@ void CInode::store_backtrace(MDSContext *fin, int op_prio)
 
     dout(20) << __func__ << ": updating old pool " << p << dendl;
 
-    ObjectOperation op;
-    op.priority = op_prio;
-    op.create(false);
-    op.setxattr("parent", parent_bl);
-
     object_locator_t oloc(p);
-    mdcache->mds->objecter->mutate(oid, oloc, op, snapc,
-				   ceph::real_clock::now(),
-				   0, gather.new_sub());
+    ops_vec.emplace_back(op_prio, oloc, parent_bl);
   }
-  gather.activate();
+
+  submit_ops();
 }
 
 void CInode::_stored_backtrace(int r, version_t v, Context *fin)
