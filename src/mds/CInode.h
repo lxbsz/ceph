@@ -42,6 +42,7 @@
 #include "Mutation.h"
 
 #include "messages/MClientCaps.h"
+#include "osdc/Objecter.h"
 
 #define dout_context g_ceph_context
 
@@ -58,6 +59,41 @@ class EMetaBlob;
 struct cinode_lock_info_t {
   int lock;
   int wr_caps;
+};
+
+struct CInodeCommitOperation : public ObjectOperation {
+public:
+  CInodeCommitOperation(int prio, object_locator_t &oloc, bufferlist &pbl)
+    : _oloc(oloc) {
+      priority = prio;
+      setxattr("parent", pbl);
+  }
+  CInodeCommitOperation(int prio, object_locator_t &oloc, bufferlist &pbl,
+                        file_layout_t l, uint64_t f)
+    : _oloc(oloc),  _layout(l), _features(f) {
+      priority = prio;
+      setxattr("parent", pbl);
+      update_layout = true;
+  }
+
+  void update() {
+    create(false);
+
+    if (!update_layout)
+      return;
+
+    using ceph::encode;
+    bufferlist layout_bl;
+    encode(_layout, layout_bl, _features);
+    setxattr("layout", layout_bl);
+  }
+
+  object_locator_t _oloc;
+
+private:
+  bool update_layout = false;
+  file_layout_t _layout;
+  uint64_t _features;
 };
 
 /**
@@ -761,6 +797,8 @@ class CInode : public MDSCacheObject, public InodeStoreBase, public Counter<CIno
   void fetch(MDSContext *fin);
   void _fetched(ceph::buffer::list& bl, ceph::buffer::list& bl2, Context *fin);  
 
+  void _commit_ops(int r, version_t version, MDSContext *fin,
+                   std::vector<CInodeCommitOperation> &ops_vec);
   void build_backtrace(int64_t pool, inode_backtrace_t& bt);
   void store_backtrace(MDSContext *fin, int op_prio=-1);
   void _stored_backtrace(int r, version_t v, Context *fin);
