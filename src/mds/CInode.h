@@ -100,6 +100,13 @@ private:
   uint64_t _features;
 };
 
+struct CInodeCommitOperations {
+  std::vector<CInodeCommitOperation> ops_vec;
+  version_t version;
+  inode_backtrace_t bt;
+  CInode *in;
+};
+
 /**
  * Base class for CInode, containing the backing store data and
  * serialization methods.  This exists so that we can read and
@@ -807,6 +814,9 @@ class CInode : public MDSCacheObject, public InodeStoreBase, public Counter<CIno
                    std::vector<CInodeCommitOperation> &ops_vec,
                    inode_backtrace_t *bt);
   void build_backtrace(int64_t pool, inode_backtrace_t *bt);
+  void _store_backtrace(std::vector<CInodeCommitOperation> &ops_vec,
+                        inode_backtrace_t *bt, int op_prio);
+  void store_backtrace(CInodeCommitOperations &op, int op_prio);
   void store_backtrace(MDSContext *fin, int op_prio=-1);
   void _stored_backtrace(int r, version_t v, Context *fin);
   void fetch_backtrace(Context *fin, ceph::buffer::list *backtrace);

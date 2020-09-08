@@ -1378,7 +1378,8 @@ void CInode::_commit_ops(int r, version_t version, MDSContext *fin,
   gather.activate();
 }
 
-void CInode::store_backtrace(MDSContext *fin, int op_prio)
+void CInode::_store_backtrace(std::vector<CInodeCommitOperation> &ops_vec,
+                              inode_backtrace_t *bt, int op_prio)
 {
   dout(10) << __func__ << " on " << *this << dendl;
   ceph_assert(is_dirty_parent());
@@ -1388,17 +1389,8 @@ void CInode::store_backtrace(MDSContext *fin, int op_prio)
 
   auth_pin(this);
 
-  std::vector<CInodeCommitOperation> ops_vec;
-
-  inode_backtrace_t *bt = new inode_backtrace_t();
   const int64_t pool = get_backtrace_pool();
   build_backtrace(pool, bt);
-
-  auto submit_ops = [&]() {
-    auto version = get_inode()->backtrace_version;
-    mdcache->mds->finisher->queue(new C_IO_Inode_CommitBacktrace(this, version,
-                                                                 fin, ops_vec, bt));
-  };
 
   object_locator_t oloc(pool);
   ops_vec.emplace_back(op_prio, oloc, get_inode()->layout,
@@ -1406,7 +1398,6 @@ void CInode::store_backtrace(MDSContext *fin, int op_prio)
 
   if (!state_test(STATE_DIRTYPOOL) || get_inode()->old_pools.empty()) {
     dout(20) << __func__ << ": no dirtypool or no old pools" << dendl;
-    submit_ops();
     return;
   }
 
@@ -1422,8 +1413,25 @@ void CInode::store_backtrace(MDSContext *fin, int op_prio)
     object_locator_t oloc(p);
     ops_vec.emplace_back(op_prio, oloc);
   }
+}
 
-  submit_ops();
+void CInode::store_backtrace(MDSContext *fin, int op_prio)
+{
+  std::vector<CInodeCommitOperation> ops_vec;
+  auto version = get_inode()->backtrace_version;
+
+  inode_backtrace_t *bt = new inode_backtrace_t();
+  _store_backtrace(ops_vec, bt, op_prio);
+  mdcache->mds->finisher->queue(new C_IO_Inode_CommitBacktrace(this, version,
+                                                               fin, ops_vec, bt));
+}
+
+void CInode::store_backtrace(CInodeCommitOperations &op, int op_prio)
+{
+  op.version = get_inode()->backtrace_version;
+  op.in = this;
+
+  _store_backtrace(op.ops_vec, &op.bt, op_prio);
 }
 
 void CInode::_stored_backtrace(int r, version_t v, Context *fin)
