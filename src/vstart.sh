@@ -594,6 +594,9 @@ prepare_conf() {
         enable experimental unrecoverable data corrupting features = *
         osd_crush_chooseleaf_type = 0
         debug asok assert abort = true
+	debug mds = 25/25
+	debug journal = 25/25
+	debug journaler = 25/25
 $msgr_conf
 $extra_conf
 EOF
