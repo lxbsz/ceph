@@ -4007,7 +4007,7 @@ void Server::_lookup_snap_ino(MDRequestRef& mdr)
     if (!mds->locker->acquire_locks(mdr, lov))
       return;
 
-    frag_t frag = diri->dirfragtree[hash];
+    frag_t frag = (*diri->dirfragtree)[hash];
     CDir *dir = try_open_auth_dirfrag(diri, frag, mdr);
     if (!dir)
       return;
@@ -4487,18 +4487,18 @@ void Server::handle_client_readdir(MDRequestRef& mdr)
 	   << " offset_hash " << offset_hash << " flags " << req_flags << dendl;
 
   // does the frag exist?
-  if (diri->dirfragtree[fg.value()] != fg) {
+  if ((*diri->dirfragtree)[fg.value()] != fg) {
     frag_t newfg;
     if (req_flags & CEPH_READDIR_REPLY_BITFLAGS) {
       if (fg.contains((unsigned)offset_hash)) {
-	newfg = diri->dirfragtree[offset_hash];
+	newfg = (*diri->dirfragtree)[offset_hash];
       } else {
 	// client actually wants next frag
-	newfg = diri->dirfragtree[fg.value()];
+	newfg = (*diri->dirfragtree)[fg.value()];
       }
     } else {
       offset_str.clear();
-      newfg = diri->dirfragtree[fg.value()];
+      newfg = (*diri->dirfragtree)[fg.value()];
     }
     dout(10) << " adjust frag " << fg << " -> " << newfg << " " << diri->dirfragtree << dendl;
     fg = newfg;
@@ -7922,7 +7922,7 @@ void Server::handle_client_rename(MDRequestRef& mdr)
     mdr->set_stickydirs(srci);
 
     frag_vec_t leaves;
-    srci->dirfragtree.get_leaves(leaves);
+    srci->dirfragtree->get_leaves(leaves);
     for (const auto& leaf : leaves) {
       CDir *dir = srci->get_dirfrag(leaf);
       if (!dir) {

@@ -1071,9 +1071,9 @@ void OpenFileTable::_prefetch_dirfrags()
 	  fetch_queue.push_back(dir);
       } else {
 	frag_vec_t leaves;
-	diri->dirfragtree.get_leaves_under(fg, leaves);
+	diri->dirfragtree->get_leaves_under(fg, leaves);
 	if (leaves.empty())
-	  leaves.push_back(diri->dirfragtree[fg.value()]);
+	  leaves.push_back((*diri->dirfragtree)[fg.value()]);
 	for (auto& leaf : leaves) {
 	  if (diri->is_auth()) {
 	    dir = diri->get_or_open_dirfrag(mdcache, leaf);
@@ -1091,7 +1091,7 @@ void OpenFileTable::_prefetch_dirfrags()
   int num_opening_dirfrags = 0;
   for (const auto& dir : fetch_queue) {
     if (dir->state_test(CDir::STATE_REJOINUNDEF))
-      ceph_assert(dir->get_inode()->dirfragtree.is_leaf(dir->get_frag()));
+      ceph_assert(dir->get_inode()->dirfragtree->is_leaf(dir->get_frag()));
     dir->fetch(gather.new_sub());
 
     if (!(++num_opening_dirfrags % 1000))

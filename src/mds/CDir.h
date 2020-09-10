@@ -72,7 +72,7 @@ public:
 
     mempool::mds_co::string symlink = "";
     uint64_t features;
-    fragtree_t dirfragtree;
+    fragtree_ptr dirfragtree;
     CInode::inode_const_ptr inode;
     CInode::xattr_map_const_ptr xattrs;
     CInode::old_inode_map_const_ptr old_inodes;

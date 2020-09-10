@@ -463,7 +463,7 @@ private:
 
     lump.nfull++;
     lump.add_dfull(dn->get_name(), dn->first, dn->last, dn->get_projected_version(),
-		   pi, in->dirfragtree, in->get_projected_xattrs(), in->symlink,
+		   pi, *in->dirfragtree, in->get_projected_xattrs(), in->symlink,
 		   in->oldest_snap, snapbl, state, in->get_old_inodes());
 
     // make note of where this inode was last journaled
@@ -505,7 +505,7 @@ private:
 
     const auto& pi = in->get_projected_inode();
     const auto& px = in->get_projected_xattrs();
-    const auto& pdft = in->dirfragtree;
+    const auto& pdft = *in->dirfragtree;
 
     bufferlist snapbl;
     const sr_t *sr = in->get_projected_srnode();

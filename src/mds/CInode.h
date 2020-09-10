@@ -186,7 +186,8 @@ public:
   frag_t pick_dirfrag(std::string_view dn);
 
   mempool::mds_co::string	symlink;      // symlink dest, if symlink
-  fragtree_t			dirfragtree;  // dir frag tree, if any.  always consistent with our dirfrag map.
+  // dir frag tree, if any.  always consistent with our dirfrag map.
+  fragtree_ptr			dirfragtree = std::make_shared<fragtree_t>();
   snapid_t 			oldest_snap = CEPH_NOSNAP;
   damage_flags_t 		damage_flags = 0;
 

@@ -600,4 +600,5 @@ inline std::ostream& operator<<(std::ostream& out, const fragset_t& fs)
   return out << "fragset_t(" << fs.get() << ")";
 }
 
+using fragtree_ptr = std::shared_ptr<fragtree_t>;
 #endif

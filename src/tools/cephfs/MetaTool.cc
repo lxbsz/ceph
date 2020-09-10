@@ -416,7 +416,7 @@ int MetaTool::show_fn(meta_op &op)
 int MetaTool::_show_fn(inode_meta_t& inode_meta, const string& fn)
 {
   std::list<frag_t> frags;
-  inode_meta.get_meta()->dirfragtree.get_leaves(frags);
+  inode_meta.get_meta()->dirfragtree->get_leaves(frags);
   std::stringstream ds;
   std::string format = "json";
   std::string oids;

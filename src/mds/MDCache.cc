@@ -826,7 +826,7 @@ void MDCache::populate_mydir()
 
     // open all frags
     frag_vec_t leaves;
-    strays[i]->dirfragtree.get_leaves(leaves);
+    strays[i]->dirfragtree->get_leaves(leaves);
     for (const auto& leaf : leaves) {
       CDir *dir = strays[i]->get_dirfrag(leaf);
       if (!dir) {
@@ -1232,9 +1232,9 @@ void MDCache::get_force_dirfrag_bound_set(const vector<dirfrag_t>& dfs, set<CDir
 
     for (const auto& fg : p->second) {
       frag_vec_t leaves;
-      diri->dirfragtree.get_leaves_under(fg, leaves);
+      diri->dirfragtree->get_leaves_under(fg, leaves);
       if (leaves.empty()) {
-	frag_t approx_fg = diri->dirfragtree[fg.value()];
+	frag_t approx_fg = (*diri->dirfragtree)[fg.value()];
         frag_vec_t approx_leaves;
 	tmpdft.get_leaves_under(approx_fg, approx_leaves);
 	for (const auto& leaf : approx_leaves) {
@@ -1282,7 +1282,7 @@ void MDCache::map_dirfrag_set(const list<dirfrag_t>& dfs, set<CDir*>& result)
 
     frag_vec_t fgs;
     for (const auto& fg : p->second) {
-      in->dirfragtree.get_leaves_under(fg, fgs);
+      in->dirfragtree->get_leaves_under(fg, fgs);
     }
 
     dout(15) << "map_dirfrag_set " << p->second << " -> " << fgs
@@ -4515,12 +4515,12 @@ void MDCache::handle_cache_rejoin_weak(const cref_t<MMDSCacheRejoin> &weak)
     ceph_assert(diri);
 
     frag_vec_t leaves;
-    if (diri->dirfragtree.is_leaf(p.frag)) {
+    if (diri->dirfragtree->is_leaf(p.frag)) {
       leaves.push_back(p.frag);
     } else {
-      diri->dirfragtree.get_leaves_under(p.frag, leaves);
+      diri->dirfragtree->get_leaves_under(p.frag, leaves);
       if (leaves.empty())
-	leaves.push_back(diri->dirfragtree[p.frag.value()]);
+	leaves.push_back((*diri->dirfragtree)[p.frag.value()]);
     }
     for (const auto& leaf : leaves) {
       CDir *dir = diri->get_dirfrag(leaf);
@@ -4783,7 +4783,7 @@ void MDCache::handle_cache_rejoin_strong(const cref_t<MMDSCacheRejoin> &strong)
     } else {
       if (diri->state_test(CInode::STATE_REJOINUNDEF))
 	dir = rejoin_invent_dirfrag(dirfrag_t(diri->ino(), frag_t()));
-      else if (diri->dirfragtree.is_leaf(dirfrag.frag))
+      else if (diri->dirfragtree->is_leaf(dirfrag.frag))
 	dir = rejoin_invent_dirfrag(dirfrag);
     }
     if (dir) {
@@ -4792,9 +4792,9 @@ void MDCache::handle_cache_rejoin_strong(const cref_t<MMDSCacheRejoin> &strong)
     } else {
       dout(10) << " frag " << dirfrag << " doesn't match dirfragtree " << *diri << dendl;
       frag_vec_t leaves;
-      diri->dirfragtree.get_leaves_under(dirfrag.frag, leaves);
+      diri->dirfragtree->get_leaves_under(dirfrag.frag, leaves);
       if (leaves.empty())
-	leaves.push_back(diri->dirfragtree[dirfrag.frag.value()]);
+	leaves.push_back((*diri->dirfragtree)[dirfrag.frag.value()]);
       dout(10) << " maps to frag(s) " << leaves << dendl;
       for (const auto& leaf : leaves) {
 	CDir *dir = diri->get_dirfrag(leaf);
@@ -6081,7 +6081,7 @@ bool MDCache::open_undef_inodes_dirfrags()
     if (diri->state_test(CInode::STATE_REJOINUNDEF))
       continue;
     if (dir->state_test(CDir::STATE_REJOINUNDEF))
-      ceph_assert(diri->dirfragtree.is_leaf(dir->get_frag()));
+      ceph_assert(diri->dirfragtree->is_leaf(dir->get_frag()));
     dir->fetch(gather.new_sub());
   }
   ceph_assert(gather.has_subs());
@@ -6095,7 +6095,7 @@ void MDCache::opened_undef_inode(CInode *in) {
   if (in->is_dir()) {
     // FIXME: re-hash dentries if necessary
     ceph_assert(in->get_inode()->dir_layout.dl_dir_hash == g_conf()->mds_default_dir_hash);
-    if (in->get_num_dirfrags() && !in->dirfragtree.is_leaf(frag_t())) {
+    if (in->get_num_dirfrags() && !in->dirfragtree->is_leaf(frag_t())) {
       CDir *dir = in->get_dirfrag(frag_t());
       ceph_assert(dir);
       rejoin_undef_dirfrags.erase(dir);
@@ -9032,7 +9032,7 @@ void MDCache::_open_ino_traverse_dir(inodeno_t ino, open_ino_info_t& info, int r
 void MDCache::_open_ino_fetch_dir(inodeno_t ino, const cref_t<MMDSOpenIno> &m, CDir *dir, bool parent)
 {
   if (dir->state_test(CDir::STATE_REJOINUNDEF))
-    ceph_assert(dir->get_inode()->dirfragtree.is_leaf(dir->get_frag()));
+    ceph_assert(dir->get_inode()->dirfragtree->is_leaf(dir->get_frag()));
   dir->fetch(new C_MDC_OpenInoTraverseDir(this, ino, m, parent));
   if (mds->logger)
     mds->logger->inc(l_mds_openino_dir_fetch);
@@ -10089,7 +10089,7 @@ void MDCache::scan_stray_dir(dirfrag_t next)
   dout(10) << "scan_stray_dir " << next << dendl;
 
   if (next.ino)
-    next.frag = strays[MDS_INO_STRAY_INDEX(next.ino)]->dirfragtree[next.frag.value()];
+    next.frag = (*strays[MDS_INO_STRAY_INDEX(next.ino)]->dirfragtree)[next.frag.value()];
 
   for (int i = 0; i < NUM_STRAY; ++i) {
     if (strays[i]->ino() < next.ino)
@@ -10421,8 +10421,8 @@ void MDCache::handle_discover(const cref_t<MDiscover> &dis)
       // requester explicity specified the frag
       ceph_assert(dis->wants_base_dir() || MDS_INO_IS_BASE(dis->get_base_ino()));
       fg = dis->get_base_dir_frag();
-      if (!cur->dirfragtree.is_leaf(fg))
-	fg = cur->dirfragtree[fg.value()];
+      if (!cur->dirfragtree->is_leaf(fg))
+	fg = (*cur->dirfragtree)[fg.value()];
     }
     CDir *curdir = cur->get_dirfrag(fg);
 
@@ -10725,7 +10725,7 @@ void MDCache::handle_discover_reply(const cref_t<MDiscoverReply> &m)
       if (cur->is_waiting_for_dir(fg)) {
 	if (cur->is_auth())
 	  cur->take_waiting(CInode::WAIT_DIR, finished);
-	else if (dir || !cur->dirfragtree.is_leaf(fg))
+	else if (dir || !cur->dirfragtree->is_leaf(fg))
 	  cur->take_dir_waiting(fg, finished);
 	else
 	  discover_dir_frag(cur, fg, 0, who);
@@ -10844,10 +10844,10 @@ void MDCache::decode_replica_dir(CDir *&dir, bufferlist::const_iterator& p, CIno
     dout(7) << __func__ << " had " << *dir << " nonce " << dir->replica_nonce << dendl;
   } else {
     // force frag to leaf in the diri tree
-    if (!diri->dirfragtree.is_leaf(df.frag)) {
+    if (!diri->dirfragtree->is_leaf(df.frag)) {
       dout(7) << __func__ << " forcing frag " << df.frag << " to leaf in the fragtree "
 	      << diri->dirfragtree << dendl;
-      diri->dirfragtree.force_to_leaf(g_ceph_context, df.frag);
+      diri->dirfragtree->force_to_leaf(g_ceph_context, df.frag);
     }
     // add replica.
     dir = diri->add_dirfrag( new CDir(diri, df.frag, this, false) );
@@ -11326,7 +11326,7 @@ CDir *MDCache::force_dir_fragment(CInode *diri, frag_t fg, bool replay)
   MDSContext::vec waiters;
 
   // split a parent?
-  frag_t parent = diri->dirfragtree.get_branch_or_leaf(fg);
+  frag_t parent = diri->dirfragtree->get_branch_or_leaf(fg);
   while (1) {
     CDir *pdir = diri->get_dirfrag(parent);
     if (pdir) {
@@ -11380,11 +11380,11 @@ void MDCache::adjust_dir_fragments(CInode *diri,
 
   // adjust fragtree
   // yuck.  we may have discovered the inode while it was being fragmented.
-  if (!diri->dirfragtree.is_leaf(basefrag))
-    diri->dirfragtree.force_to_leaf(g_ceph_context, basefrag);
+  if (!diri->dirfragtree->is_leaf(basefrag))
+    diri->dirfragtree->force_to_leaf(g_ceph_context, basefrag);
 
   if (bits > 0)
-    diri->dirfragtree.split(basefrag, bits);
+    diri->dirfragtree->split(basefrag, bits);
   dout(10) << " new fragtree is " << diri->dirfragtree << dendl;
 
   if (srcfrags.empty())
@@ -11599,7 +11599,7 @@ void MDCache::merge_dir(CInode *diri, frag_t frag)
     return;
   }
 
-  if (diri->dirfragtree.is_leaf(frag)) {
+  if (diri->dirfragtree->is_leaf(frag)) {
     dout(10) << " " << frag << " already a leaf for " << *diri << dendl;
     return;
   }
@@ -11971,7 +11971,7 @@ void MDCache::dispatch_fragment_dir(MDRequestRef& mdr)
   mds->queue_waiters(waiters);
 
   for (const auto& fg : le->orig_frags)
-    ceph_assert(!diri->dirfragtree.is_leaf(fg));
+    ceph_assert(!diri->dirfragtree->is_leaf(fg));
 
   le->metablob.add_dir_context(info.resultfrags.front());
   for (const auto& dir : info.resultfrags) {
@@ -12256,8 +12256,8 @@ void MDCache::handle_fragment_notify(const cref_t<MMDSFragmentNotify> &notify)
     int bits = notify->get_bits();
 
 /*
-    if ((bits < 0 && diri->dirfragtree.is_leaf(base)) ||
-	(bits > 0 && !diri->dirfragtree.is_leaf(base))) {
+    if ((bits < 0 && diri->dirfragtree->is_leaf(base)) ||
+	(bits > 0 && !diri->dirfragtree->is_leaf(base))) {
       dout(10) << " dft " << diri->dirfragtree << " state doesn't match " << base << " by " << bits
 	       << ", must have found out during resolve/rejoin?  ignoring. " << *diri << dendl;
       return;
@@ -12386,7 +12386,7 @@ void MDCache::rollback_uncommitted_fragments()
     bool diri_auth = (diri->authority() != CDIR_AUTH_UNDEF);
 
     frag_vec_t old_frags;
-    diri->dirfragtree.get_leaves_under(p->first.frag, old_frags);
+    diri->dirfragtree->get_leaves_under(p->first.frag, old_frags);
 
     std::vector<CDir*> resultfrags;
     if (uf.old_frags.empty()) {
@@ -12446,7 +12446,7 @@ void MDCache::rollback_uncommitted_fragments()
       diri->verify_dirfrags();
 
     for (const auto& leaf : old_frags) {
-      ceph_assert(!diri->dirfragtree.is_leaf(leaf));
+      ceph_assert(!diri->dirfragtree->is_leaf(leaf));
     }
 
     mds->mdlog->submit_entry(le, new C_MDC_FragmentRollback(this, mut));
@@ -13154,7 +13154,7 @@ void MDCache::repair_inode_stats_work(MDRequestRef& mdr)
   // the scatter-gather process, which will fix any fragstat/rstat errors.
   {
     frag_vec_t leaves;
-    diri->dirfragtree.get_leaves(leaves);
+    diri->dirfragtree->get_leaves(leaves);
     for (const auto& leaf : leaves) {
       CDir *dir = diri->get_dirfrag(leaf);
       if (!dir) {
@@ -13197,7 +13197,7 @@ do_rdlocks:
 
   {
     frag_vec_t leaves;
-    diri->dirfragtree.get_leaves(leaves);
+    diri->dirfragtree->get_leaves(leaves);
     for (const auto& leaf : leaves) {
       CDir *dir = diri->get_dirfrag(leaf);
       ceph_assert(dir);

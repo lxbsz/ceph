@@ -1865,7 +1865,7 @@ CDentry *CDir::_load_dentry(
         if (in->is_symlink()) 
           in->symlink = inode_data.symlink;
         
-        in->dirfragtree.swap(inode_data.dirfragtree);
+        in->dirfragtree->swap(*inode_data.dirfragtree);
         in->reset_old_inodes(std::move(inode_data.old_inodes));
         if (in->is_any_old_inodes()) {
 	  snapid_t min_first = in->get_old_inodes()->rbegin()->first + 1;
@@ -2285,7 +2285,7 @@ void CDir::_omap_commit_ops(int r, int op_prio, version_t version,
       if (item.symlink != "")
         encode(item.symlink, bl);
 
-      encode(item.dirfragtree, bl);
+      encode(*item.dirfragtree, bl);
       if (item.xattrs)
         encode(*item.xattrs, bl);
       else

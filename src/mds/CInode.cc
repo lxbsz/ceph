@@ -147,8 +147,8 @@ ostream& operator<<(ostream& out, const CInode& in)
 
   if (in.is_symlink())
     out << " symlink='" << in.symlink << "'";
-  if (in.is_dir() && !in.dirfragtree.empty())
-    out << " " << in.dirfragtree;
+  if (in.is_dir() && !in.dirfragtree->empty())
+    out << " " << *in.dirfragtree;
   
   out << " v" << in.get_version();
   if (in.get_projected_version() > in.get_version())
@@ -696,11 +696,11 @@ __u32 InodeStoreBase::hash_dentry_name(std::string_view dn)
 
 frag_t InodeStoreBase::pick_dirfrag(std::string_view dn)
 {
-  if (dirfragtree.empty())
+  if (dirfragtree->empty())
     return frag_t();          // avoid the string hash if we can.
 
   __u32 h = hash_dentry_name(dn);
-  return dirfragtree[h];
+  return (*dirfragtree)[h];
 }
 
 std::pair<bool, std::vector<CDir*>> CInode::get_dirfrags_under(frag_t fg)
@@ -752,8 +752,8 @@ void CInode::verify_dirfrags()
 {
   bool bad = false;
   for (const auto &p : dirfrags) {
-    if (!dirfragtree.is_leaf(p.first)) {
-      dout(0) << "have open dirfrag " << p.first << " but not leaf in " << dirfragtree
+    if (!dirfragtree->is_leaf(p.first)) {
+      dout(0) << "have open dirfrag " << p.first << " but not leaf in " << *dirfragtree
 	      << ": " << *p.second << dendl;
       bad = true;
     }
@@ -765,8 +765,8 @@ void CInode::force_dirfrags()
 {
   bool bad = false;
   for (auto &p : dirfrags) {
-    if (!dirfragtree.is_leaf(p.first)) {
-      dout(0) << "have open dirfrag " << p.first << " but not leaf in " << dirfragtree
+    if (!dirfragtree->is_leaf(p.first)) {
+      dout(0) << "have open dirfrag " << p.first << " but not leaf in " << *dirfragtree
 	      << ": " << *p.second << dendl;
       bad = true;
     }
@@ -774,7 +774,7 @@ void CInode::force_dirfrags()
 
   if (bad) {
     frag_vec_t leaves;
-    dirfragtree.get_leaves(leaves);
+    dirfragtree->get_leaves(leaves);
     for (const auto& leaf : leaves) {
       mdcache->get_force_dirfrag(dirfrag_t(ino(), leaf), true);
     }
@@ -1581,7 +1581,7 @@ void InodeStoreBase::encode_bare(bufferlist &bl, uint64_t features,
   encode(*inode, bl, features);
   if (inode->is_symlink())
     encode(symlink, bl);
-  encode(dirfragtree, bl);
+  encode(*dirfragtree, bl);
   encode_xattrs(bl);
 
   if (snap_blob)
@@ -1622,7 +1622,7 @@ void InodeStoreBase::decode_bare(bufferlist::const_iterator &bl,
     decode(tmp, bl);
     symlink = std::string_view(tmp);
   }
-  decode(dirfragtree, bl);
+  decode(*dirfragtree, bl);
   decode_xattrs(bl);
   decode(snap_blob, bl);
 
@@ -1754,7 +1754,7 @@ void CInode::encode_lock_idft(bufferlist& bl)
   }
   {
     // encode the raw tree
-    encode(dirfragtree, bl);
+    encode(*dirfragtree, bl);
 
     // also specify which frags are mine
     set<frag_t> myfrags;
@@ -1794,9 +1794,9 @@ void CInode::decode_lock_idft(bufferlist::const_iterator& p)
     if (is_auth()) {
       // auth.  believe replica's auth frags only.
       for (auto fg : authfrags) {
-        if (!dirfragtree.is_leaf(fg)) {
+        if (!dirfragtree->is_leaf(fg)) {
           dout(10) << " forcing frag " << fg << " to leaf (split|merge)" << dendl;
-          dirfragtree.force_to_leaf(g_ceph_context, fg);
+          dirfragtree->force_to_leaf(g_ceph_context, fg);
           dirfragtreelock.mark_dirty();  // ok bc we're auth and caller will handle
         }
       }
@@ -1805,11 +1805,11 @@ void CInode::decode_lock_idft(bufferlist::const_iterator& p)
       //  dirfrags remain leaves (they may have split _after_ this
       //  dft was scattered, or we may still be be waiting on the
       //  notify from the auth)
-      dirfragtree.swap(temp);
+      dirfragtree->swap(temp);
       for (const auto &p : dirfrags) {
-        if (!dirfragtree.is_leaf(p.first)) {
+        if (!dirfragtree->is_leaf(p.first)) {
           dout(10) << " forcing open dirfrag " << p.first << " to leaf (racing with split|merge)" << dendl;
-          dirfragtree.force_to_leaf(g_ceph_context, p.first);
+          dirfragtree->force_to_leaf(g_ceph_context, p.first);
         }
 	if (p.second->is_auth())
 	  p.second->state_clear(CDir::STATE_DIRTYDFT);
@@ -2491,7 +2491,7 @@ void CInode::finish_scatter_gather_update(int type, MutationRef& mut)
   switch (type) {
   case CEPH_LOCK_IFILE:
     {
-      fragtree_t tmpdft = dirfragtree;
+      fragtree_t tmpdft = *dirfragtree;
       struct frag_info_t dirstat;
       bool dirstat_valid = true;
 
@@ -2609,7 +2609,7 @@ void CInode::finish_scatter_gather_update(int type, MutationRef& mut)
       // adjust summation
       ceph_assert(is_auth());
 
-      fragtree_t tmpdft = dirfragtree;
+      fragtree_t tmpdft = *dirfragtree;
       nest_info_t rstat;
       bool rstat_valid = true;
 
@@ -3883,7 +3883,7 @@ int CInode::encode_inodestat(bufferlist& bl, Session *session,
       sizeof(struct ceph_timespec) * 3 + 4 + // ctime ~ time_warp_seq
       8 + 8 + 8 + 4 + 4 + 4 + 4 + 4 + // size ~ nlink
       8 + 8 + 8 + 8 + 8 + sizeof(struct ceph_timespec) + // dirstat.nfiles ~ rstat.rctime
-      sizeof(__u32) + sizeof(__u32) * 2 * dirfragtree._splits.size() + // dirfragtree
+      sizeof(__u32) + sizeof(__u32) * 2 * dirfragtree->_splits.size() + // dirfragtree
       sizeof(__u32) + symlink.length() + // symlink
       sizeof(struct ceph_dir_layout); // dir_layout
 
@@ -4069,7 +4069,7 @@ int CInode::encode_inodestat(bufferlist& bl, Session *session,
     encode(file_i->rstat.rfiles, bl);
     encode(file_i->rstat.rsubdirs, bl);
     encode(file_i->rstat.rctime, bl);
-    dirfragtree.encode(bl);
+    dirfragtree->encode(bl);
     encode(symlink, bl);
     encode(file_i->dir_layout, bl);
     encode_xattrs();
@@ -4117,7 +4117,7 @@ int CInode::encode_inodestat(bufferlist& bl, Session *session,
     encode(file_i->rstat.rfiles, bl);
     encode(file_i->rstat.rsubdirs, bl);
     encode(file_i->rstat.rctime, bl);
-    dirfragtree.encode(bl);
+    dirfragtree->encode(bl);
     encode(symlink, bl);
     auto& conn = session->get_connection();
     if (conn->has_feature(CEPH_FEATURE_DIRLAYOUTHASH)) {
@@ -4220,7 +4220,7 @@ void CInode::_encode_base(bufferlist& bl, uint64_t features)
   encode(first, bl);
   encode(*get_inode(), bl, features);
   encode(symlink, bl);
-  encode(dirfragtree, bl);
+  encode(*dirfragtree, bl);
   encode_xattrs(bl);
   encode_old_inodes(bl, features);
   encode(damage_flags, bl);
@@ -4241,7 +4241,7 @@ void CInode::_decode_base(bufferlist::const_iterator& p)
     decode(tmp, p);
     symlink = std::string_view(tmp);
   }
-  decode(dirfragtree, p);
+  decode(*dirfragtree, p);
   decode_xattrs(p);
   decode_old_inodes(p);
   decode(damage_flags, p);
@@ -4524,7 +4524,7 @@ void InodeStoreBase::dump(Formatter *f) const
   }
   f->close_section();
   f->open_object_section("dirfragtree");
-  dirfragtree.dump(f);
+  dirfragtree->dump(f);
   f->close_section(); // dirfragtree
   
   f->open_array_section("old_inodes");
@@ -4867,7 +4867,7 @@ next:
     bool check_dirfrag_rstats() {
       MDSGatherBuilder gather(g_ceph_context);
       frag_vec_t leaves;
-      in->dirfragtree.get_leaves(leaves);
+      in->dirfragtree->get_leaves(leaves);
       for (const auto& leaf : leaves) {
         CDir *dir = in->get_or_open_dirfrag(in->mdcache, leaf);
 	dir->scrub_info();
@@ -5244,7 +5244,7 @@ void CInode::scrub_initialize(CDentry *scrub_parent,
   if (get_projected_inode()->is_dir()) {
     // fill in dirfrag_stamps with initial state
     frag_vec_t leaves;
-    dirfragtree.get_leaves(leaves);
+    dirfragtree->get_leaves(leaves);
     for (const auto& leaf : leaves) {
       if (header->get_force())
 	scrub_infop->dirfrag_stamps[leaf].reset();

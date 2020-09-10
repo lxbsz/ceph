@@ -2567,7 +2567,7 @@ void Migrator::handle_export_prep(const cref_t<MExportDirPrep> &m, bool did_assi
       // map fragset into a frag_t list, based on the inode fragtree
       frag_vec_t leaves;
       for (const auto& frag : p->second) {
-	in->dirfragtree.get_leaves_under(frag, leaves);
+	in->dirfragtree->get_leaves_under(frag, leaves);
       }
       dout(10) << " bound inode " << p->first << " fragset " << p->second << " maps to " << leaves << dendl;
 
@@ -2674,8 +2674,8 @@ void Migrator::handle_export_dir(const cref_t<MExportDir> &m)
   ceph_assert(it->second.tid == m->get_tid());
   ceph_assert(it->second.peer == oldauth);
 
-  if (!dir->get_inode()->dirfragtree.is_leaf(dir->get_frag()))
-    dir->get_inode()->dirfragtree.force_to_leaf(g_ceph_context, dir->get_frag());
+  if (!dir->get_inode()->dirfragtree->is_leaf(dir->get_frag()))
+    dir->get_inode()->dirfragtree->force_to_leaf(g_ceph_context, dir->get_frag());
 
   mdcache->show_subtrees();
 

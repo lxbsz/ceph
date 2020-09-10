@@ -566,10 +566,10 @@ void EMetaBlob::fullbit::update_inode(MDSRank *mds, CInode *in)
     }
     in->maybe_ephemeral_dist();
     in->maybe_export_pin();
-    if (!(in->dirfragtree == dirfragtree)) {
-      dout(10) << "EMetaBlob::fullbit::update_inode dft " << in->dirfragtree << " -> "
+    if (!(*in->dirfragtree == dirfragtree)) {
+      dout(10) << "EMetaBlob::fullbit::update_inode dft " << in->dirfragtree.get() << " -> "
 	       << dirfragtree << " on " << *in << dendl;
-      in->dirfragtree = std::move(dirfragtree);
+      *in->dirfragtree = std::move(dirfragtree);
       in->force_dirfrags();
       if (in->get_num_dirfrags() && in->authority() == CDIR_AUTH_UNDEF) {
 	auto&& ls = in->get_nested_dirfrags();
@@ -1428,7 +1428,7 @@ void EMetaBlob::replay(MDSRank *mds, LogSegment *logseg, MDPeerUpdate *peerup)
 	  renamed_diri->authority() == CDIR_AUTH_UNDEF) {
 	ceph_assert(peerup); // auth to non-auth, must be peer prepare
         frag_vec_t leaves;
-	renamed_diri->dirfragtree.get_leaves(leaves);
+	renamed_diri->dirfragtree->get_leaves(leaves);
 	for (const auto& leaf : leaves) {
 	  CDir *dir = renamed_diri->get_dirfrag(leaf);
 	  ceph_assert(dir);
@@ -2832,7 +2832,7 @@ void EFragment::replay(MDSRank *mds)
   case OP_ROLLBACK: {
     frag_vec_t old_frags;
     if (in) {
-      in->dirfragtree.get_leaves_under(basefrag, old_frags);
+      in->dirfragtree->get_leaves_under(basefrag, old_frags);
       if (orig_frags.empty()) {
 	// old format EFragment
 	mds->mdcache->adjust_dir_fragments(in, basefrag, -bits, &resultfrags, waiters, true);

@@ -3154,7 +3154,7 @@ bool MDSRank::command_dirfrag_ls(
   frag_vec_t leaves;
   // NB using get_leaves_under instead of get_dirfrags to give
   // you the list of what dirfrags may exist, not which are in cache
-  in->dirfragtree.get_leaves_under(frag_t(), leaves);
+  in->dirfragtree->get_leaves_under(frag_t(), leaves);
   for (const auto& leaf : leaves) {
     f->open_object_section("frag");
     f->dump_int("value", leaf.value());

@@ -105,7 +105,7 @@ void StrayManager::purge(CDentry *dn)
   item.stamp = ceph_clock_now();
   if (in->is_dir()) {
     item.action = PurgeItem::PURGE_DIR;
-    item.fragtree = in->dirfragtree;
+    item.fragtree = *in->dirfragtree;
   } else {
     item.action = PurgeItem::PURGE_FILE;
 
