@@ -28,6 +28,7 @@
 #include "ceph_frag.h"
 #include "include/encoding.h"
 #include "include/ceph_assert.h"
+#include "include/spinlock.h"
 
 #include "common/dout.h"
 
@@ -196,36 +197,46 @@ class fragtree_t {
   //  if child frag_t does not appear, it is not split.
 public:
   compact_map<frag_t,int32_t> _splits;
+private:
+  ceph::spinlock lock;
 
 public:
   // -------------
   // basics
   void swap(fragtree_t& other) {
+    std::scoped_lock l(lock);
     _splits.swap(other._splits);
   }
   void clear() {
+    std::scoped_lock l(lock);
     _splits.clear();
   }
 
   // -------------
   // accessors
   bool empty() const { 
+    std::scoped_lock l(lock);
     return _splits.empty();
   }
-  int get_split(const frag_t hb) const {
-    compact_map<frag_t,int32_t>::const_iterator p = _splits.find(hb);
-    if (p == _splits.end())
+  int _get_split(const frag_t hb) const {
+    auto iter = _splits.find(hb);
+    if (iter == _splits.end())
       return 0;
     else
-      return p->second;
+      return iter->second;
   }
 
   
-  bool is_leaf(frag_t x) const {
+  bool _is_leaf(frag_t x) const {
     frag_vec_t s;
     get_leaves_under(x, s);
     //generic_dout(10) << "is_leaf(" << x << ") -> " << ls << dendl;
     return s.size() == 1 && s.front() == x;
+  }
+
+  bool is_leaf(frag_t x) const {
+    std::scoped_lock l(lock);
+    return _is_leaf(x);
   }
 
   /**
@@ -243,10 +254,11 @@ public:
   void get_leaves_under_split(frag_t under, T& c) const {
     frag_vec_t s;
     s.push_back(under);
+    std::scoped_lock l(lock);
     while (!s.empty()) {
       frag_t t = s.back();
       s.pop_back();
-      int nb = get_split(t);
+      int nb = _get_split(t);
       if (nb) 
 	t.split(nb, s);   // queue up children
       else
@@ -255,45 +267,54 @@ public:
   }
 
   /**
-   * get_branch -- get branch point at OR above frag @a x
+   * _get_branch -- get branch point at OR above frag @a x
    *  - may be @a x itself, if @a x is a split
    *  - may be root (frag_t())
    */
-  frag_t get_branch(frag_t x) const {
+  frag_t _get_branch(frag_t x) const {
     while (1) {
       if (x == frag_t()) return x;  // root
-      if (get_split(x)) return x;   // found it!
+      if (_get_split(x)) return x;   // found it!
       x = x.parent();
     }
   }
 
   /**
-   * get_branch_above -- get a branch point above frag @a x
+   * _get_branch_above -- get a branch point above frag @a x
    *  - may be root (frag_t())
    *  - may NOT be @a x, even if @a x is a split.
    */
-  frag_t get_branch_above(frag_t x) const {
+  frag_t _get_branch_above(frag_t x) const {
     while (1) {
       if (x == frag_t()) return x;  // root
       x = x.parent();
-      if (get_split(x)) return x;   // found it!
+      if (_get_split(x)) return x;   // found it!
     }
   }
 
+  frag_t get_branch_above(frag_t x) const {
+    std::scoped_lock l(lock);
+    return _get_branch_above(x);
+  }
 
   /**
    * get_branch_or_leaf -- get branch or leaf point parent for frag @a x
    *  - may be @a x itself, if @a x is a split or leaf
    *  - may be root (frag_t())
    */
-  frag_t get_branch_or_leaf(frag_t x) const {
-    frag_t branch = get_branch(x);
-    int nb = get_split(branch);
+  frag_t _get_branch_or_leaf(frag_t x) const {
+    frag_t branch = _get_branch(x);
+    int nb = _get_split(branch);
     if (nb > 0 &&                                  // if branch is a split, and
 	branch.bits() + nb <= x.bits())            // one of the children is or contains x 
       return frag_t(x.value(), branch.bits()+nb);  // then return that child (it's a leaf)
     else
       return branch;
+  }
+
+  frag_t get_branch_or_leaf(frag_t x) const {
+    std::scoped_lock l(lock);
+    return _get_branch_or_leaf(x);
   }
 
   /**
@@ -302,14 +323,15 @@ public:
   template<typename T>
   void get_leaves_under(frag_t x, T& c) const {
     frag_vec_t s;
-    s.push_back(get_branch_or_leaf(x));
+    std::scoped_lock l(lock);
+    s.push_back(_get_branch_or_leaf(x));
     while (!s.empty()) {
       frag_t t = s.back();
       s.pop_back();
       if (t.bits() >= x.bits() &&    // if t is more specific than x, and
 	  !x.contains(t))            // x does not contain t,
 	continue;         // then skip
-      int nb = get_split(t);
+      int nb = _get_split(t);
       if (nb) 
 	t.split(nb, s);   // queue up children
       else if (x.contains(t))
@@ -322,14 +344,15 @@ public:
    */
   bool contains(frag_t x) const {
     frag_vec_t s;
-    s.push_back(get_branch(x));
+    std::scoped_lock l(lock);
+    s.push_back(_get_branch(x));
     while (!s.empty()) {
       frag_t t = s.back();
       s.pop_back();
       if (t.bits() >= x.bits() &&  // if t is more specific than x, and
 	  !x.contains(t))          // x does not contain t,
 	continue;         // then skip 
-      int nb = get_split(t);
+      int nb = _get_split(t);
       if (nb) {
 	if (t == x) return false;  // it's split.
 	t.split(nb, s);   // queue up children
@@ -345,9 +368,10 @@ public:
    */
   frag_t operator[](unsigned v) const {
     frag_t t;
+    std::scoped_lock l(lock);
     while (1) {
       ceph_assert(t.contains(v));
-      int nb = get_split(t);
+      int nb = _get_split(t);
 
       // is this a leaf?
       if (nb == 0) return t;  // done.
@@ -370,19 +394,20 @@ public:
   // ---------------
   // modifiers
   void split(frag_t x, int b, bool simplify=true) {
-    ceph_assert(is_leaf(x));
+    ceph_assert(_is_leaf(x));
     _splits[x] = b;
     
     if (simplify)
-      try_assimilate_children(get_branch_above(x));
+      try_assimilate_children(_get_branch_above(x));
   }
   void merge(frag_t x, int b, bool simplify=true) {
-    ceph_assert(!is_leaf(x));
+    std::scoped_lock l(lock);
+    ceph_assert(!_is_leaf(x));
     ceph_assert(_splits[x] == b);
     _splits.erase(x);
 
     if (simplify)
-      try_assimilate_children(get_branch_above(x));
+      try_assimilate_children(_get_branch_above(x));
   }
 
   /*
@@ -390,13 +415,14 @@ public:
    * then the children can be assimilated.
    */
   void try_assimilate_children(frag_t x) {
-    int nb = get_split(x);
+    std::scoped_lock l(lock);
+    int nb = _get_split(x);
     if (!nb) return;
     frag_vec_t children;
     x.split(nb, children);
     int childbits = 0;
     for (auto& frag : children) {
-      int cb = get_split(frag);
+      int cb = _get_split(frag);
       if (!cb) return;  // nope.
       if (childbits && cb != childbits) return;  // not the same
       childbits = cb;
@@ -408,25 +434,26 @@ public:
   }
 
   bool force_to_leaf(CephContext *cct, frag_t x) {
-    if (is_leaf(x))
+    std::scoped_lock l(lock);
+    if (_is_leaf(x))
       return false;
 
     lgeneric_dout(cct, 10) << "force_to_leaf " << x << " on " << _splits << dendl;
 
-    frag_t parent = get_branch_or_leaf(x);
+    frag_t parent = _get_branch_or_leaf(x);
     ceph_assert(parent.bits() <= x.bits());
     lgeneric_dout(cct, 10) << "parent is " << parent << dendl;
 
     // do we need to split from parent to x?
     if (parent.bits() < x.bits()) {
       int spread = x.bits() - parent.bits();
-      int nb = get_split(parent);
+      int nb = _get_split(parent);
       lgeneric_dout(cct, 10) << "spread " << spread << ", parent splits by " << nb << dendl;
       if (nb == 0) {
 	// easy: split parent (a leaf) by the difference
 	lgeneric_dout(cct, 10) << "splitting parent " << parent << " by spread " << spread << dendl;
 	split(parent, spread);
-	ceph_assert(is_leaf(x));
+	ceph_assert(_is_leaf(x));
 	return true;
       }
       ceph_assert(nb > spread);
@@ -450,7 +477,7 @@ public:
     while (!s.empty()) {
       frag_t t = s.back();
       s.pop_back();
-      int nb = get_split(t);
+      int nb = _get_split(t);
       if (nb) {
 	lgeneric_dout(cct, 10) << "merging child " << t << " by " << nb << dendl;
 	merge(t, nb, false);    // merge this point, and
@@ -459,30 +486,32 @@ public:
     }
 
     lgeneric_dout(cct, 10) << "force_to_leaf done" << dendl;
-    ceph_assert(is_leaf(x));
+    ceph_assert(_is_leaf(x));
     return true;
   }
 
   // encoding
   void encode(ceph::buffer::list& bl) const {
     using ceph::encode;
+    std::scoped_lock l(lock);
     encode(_splits, bl);
   }
   void decode(ceph::buffer::list::const_iterator& p) {
     using ceph::decode;
+    std::scoped_lock l(lock);
     decode(_splits, p);
   }
   void encode_nohead(ceph::buffer::list& bl) const {
     using ceph::encode;
-    for (compact_map<frag_t,int32_t>::const_iterator p = _splits.begin();
-	 p != _splits.end();
-	 ++p) {
-      encode(p->first, bl);
-      encode(p->second, bl);
+    std::scoped_lock l(lock);
+    for (auto &[f, b] : _splits) {
+      encode(f, bl);
+      encode(b, bl);
     }
   }
   void decode_nohead(int n, ceph::buffer::list::const_iterator& p) {
     using ceph::decode;
+    std::scoped_lock l(lock);
     _splits.clear();
     while (n-- > 0) {
       frag_t f;
@@ -495,6 +524,7 @@ public:
     out << "fragtree_t(";
     frag_vec_t s;
     s.push_back(frag_t());
+    std::scoped_lock l(lock);
     while (!s.empty()) {
       frag_t t = s.back();
       s.pop_back();
@@ -503,7 +533,7 @@ public:
 	out << std::endl;
 	for (unsigned i=0; i<t.bits(); i++) out << ' ';
       }
-      int nb = get_split(t);
+      int nb = _get_split(t);
       if (nb) {
 	out << t << " %" << nb;
 	t.split(nb, s);   // queue up children
@@ -516,6 +546,7 @@ public:
 
   void dump(ceph::Formatter *f) const {
     f->open_array_section("splits");
+    std::scoped_lock l(lock);
     for (auto p = _splits.begin(); p != _splits.end(); ++p) {
       f->open_object_section("split");
       std::ostringstream frag_str;
@@ -530,22 +561,43 @@ public:
 WRITE_CLASS_ENCODER(fragtree_t)
 
 inline bool operator==(const fragtree_t& l, const fragtree_t& r) {
+  if (&l > &r) {
+    std::scoped_lock k1(l.lock);
+    std::scoped_lock k2(r.lock);
+  } else if (&l < &r) {
+    std::scoped_lock k2(r.lock);
+    std::scoped_lock k1(l.lock);
+  } else {
+    std::scoped_lock k1(l.lock);
+  }
+
   return l._splits == r._splits;
 }
 inline bool operator!=(const fragtree_t& l, const fragtree_t& r) {
+  if (&l > &r) {
+    std::scoped_lock k1(l.lock);
+    std::scoped_lock k2(r.lock);
+  } else if (&l < &r) {
+    std::scoped_lock k2(r.lock);
+    std::scoped_lock k1(l.lock);
+  } else {
+    std::scoped_lock k1(l.lock);
+  }
   return l._splits != r._splits;
 }
 
 inline std::ostream& operator<<(std::ostream& out, const fragtree_t& ft)
 {
   out << "fragtree_t(";
-  
-  for (compact_map<frag_t,int32_t>::const_iterator p = ft._splits.begin();
-       p != ft._splits.end();
-       ++p) {
-    if (p != ft._splits.begin())
+  bool first = true;
+
+  std::scoped_lock l(ft.lock);
+  for (auto &[f, b] : ft._splits) {
+    if (first)
+      first = false;
+    else
       out << " ";
-    out << p->first << "^" << p->second;
+    out << f << "^" << b;
   }
   return out << ")";
 }
