@@ -837,7 +837,10 @@ int JournalTool::recover_dentries(
           // Read out inode version to compare with backing store
           InodeStore inode;
           if (dentry_type == 'i') {
+	    bufferlist alternate_name;
+
             DECODE_START(1, q);
+	    decode(alternate_name, q);
             inode.decode(q);
             DECODE_FINISH(q);
 	  } else {

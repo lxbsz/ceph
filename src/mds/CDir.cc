@@ -1770,6 +1770,7 @@ CDentry *CDir::_load_dentry(
       DECODE_START(1, q);
       decode(ino, q);
       decode(d_type, q);
+      dn->decode_alternate_name(q);
       DECODE_FINISH(q);
     } else {
       decode(ino, q);
@@ -1811,11 +1812,12 @@ CDentry *CDir::_load_dentry(
     }
   }
   else if (type == 'I' || type == 'i') {
+    // inode
+    // Load inode data before looking up or constructing CInode
     InodeStore inode_data;
     if (type == 'i') {
       DECODE_START(1, q);
-    // inode
-    // Load inode data before looking up or constructing CInode
+      dn->decode_alternate_name(q);
       inode_data.decode(q);
       DECODE_FINISH(q);
     } else {
@@ -2338,6 +2340,7 @@ void CDir::_encode_dentry(CDentry *dn, bufferlist& bl,
     ENCODE_START(1, 1, bl);
     encode(ino, bl);
     encode(d_type, bl);
+    dn->encode_alternate_name(bl);
     ENCODE_FINISH(bl);
   } else if (dn->linkage.is_primary()) {
     // primary link
@@ -2361,6 +2364,7 @@ void CDir::_encode_dentry(CDentry *dn, bufferlist& bl,
     bufferlist snap_blob;
     in->encode_snap_blob(snap_blob);
     ENCODE_START(1, 1, bl);
+    dn->encode_alternate_name(bl);
     in->encode(bl, mdcache->mds->mdsmap->get_up_features(), &snap_blob);
     ENCODE_FINISH(bl);
   } else {
