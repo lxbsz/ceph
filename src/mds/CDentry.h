@@ -151,6 +151,10 @@ public:
   const CDir *get_dir() const { return dir; }
   CDir *get_dir() { return dir; }
   std::string_view get_name() const { return std::string_view(name); }
+  void set_alternate_name(bufferptr &&cipher) { alternate_name.append(std::move(cipher)); }
+  const bufferlist& get_alternate_name() const { return alternate_name; }
+  bool has_alternate_name() { return !!alternate_name.length(); }
+  void decode_alternate_name(bufferlist::const_iterator &bl) { decode(alternate_name, bl); }
 
   __u32 get_hash() const { return hash; }
 
@@ -367,6 +371,7 @@ protected:
 
 private:
   mempool::mds_co::string name;
+  bufferlist alternate_name;
 };
 
 std::ostream& operator<<(std::ostream& out, const CDentry& dn);

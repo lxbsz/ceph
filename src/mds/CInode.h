@@ -848,6 +848,7 @@ class CInode : public MDSCacheObject, public InodeStoreBase, public Counter<CIno
   
   // for giving to clients
   int encode_inodestat(ceph::buffer::list& bl, Session *session, SnapRealm *realm,
+                       const bufferlist& alternate_name,
 		       snapid_t snapid=CEPH_NOSNAP, unsigned max_bytes=0,
 		       int getattr_wants=0);
   void encode_cap_message(const ceph::ref_t<MClientCaps> &m, Capability *cap);

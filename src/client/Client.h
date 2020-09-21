@@ -720,10 +720,11 @@ public:
 			      utime_t ctime, utime_t mtime, utime_t atime);
 
   Inode *add_update_inode(InodeStat *st, utime_t ttl, MetaSession *session,
-			  const UserPerm& request_perms);
+			  const UserPerm& request_perms,
+                          bufferlist& alternate_name);
   Dentry *insert_dentry_inode(Dir *dir, const string& dname, LeaseStat *dlease,
 			      Inode *in, utime_t from, MetaSession *session,
-			      Dentry *old_dentry = NULL);
+                              bufferlist& alternate_name, Dentry *old_dentry = NULL);
   void update_dentry_lease(Dentry *dn, LeaseStat *dlease, utime_t from, MetaSession *session);
 
   bool use_faked_inos() { return _use_faked_inos; }

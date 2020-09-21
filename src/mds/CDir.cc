@@ -1768,9 +1768,11 @@ CDentry *CDir::_load_dentry(
     unsigned char d_type;
 
     if (type == 'l') {
-      DECODE_START(1, q);
+      DECODE_START(2, q);
       decode(ino, q);
       decode(d_type, q);
+      if (struct_v >= 2)
+        dn->decode_alternate_name(q);
       DECODE_FINISH(q);
     } else {
       decode(ino, q);
@@ -1812,11 +1814,13 @@ CDentry *CDir::_load_dentry(
     }
   }
   else if (type == 'I' || type == 'i') {
-    InodeStore inode_data;
     // inode
     // Load inode data before looking up or constructing CInode
+    InodeStore inode_data;
     if (type == 'i') {
-      DECODE_START(1, q);
+      DECODE_START(2, q);
+      if (struct_v >= 2)
+        dn->decode_alternate_name(q);
       inode_data.decode(q);
       DECODE_FINISH(q);
     } else {
@@ -2331,15 +2335,17 @@ void CDir::_omap_commit_ops(int r, int op_prio, version_t version, bool _new, bu
     if (item.is_remote) {
       // marker, name, ino
       bl.append('l');         // remote link
-      ENCODE_START(1, 1, bl);
+      ENCODE_START(2, 1, bl);
       encode(item.ino, bl);
       encode(item.d_type, bl);
+      encode(item.alternate_name, bl);
       ENCODE_FINISH(bl);
     } else {
       // marker, name, inode, [symlink string]
       bl.append('i');         // inode
 
-      ENCODE_START(1, 1, bl);
+      ENCODE_START(2, 1, bl);
+      encode(item.alternate_name, bl);
       _encode_primary_inode_base(item, dfts, bl);
       ENCODE_FINISH(bl);
     }
@@ -2393,6 +2399,7 @@ void CDir::_omap_commit(int op_prio)
   // reverve enough memories, which maybe larger than the actually needed
   to_set.reserve(count);
 
+  // for dir fragtrees
   bufferlist dfts(CEPH_PAGE_SIZE);
 
   auto write_one = [&](CDentry *dn) {
@@ -2456,6 +2463,10 @@ void CDir::_parse_dentry(CDentry *dn, dentry_commit_item &item,
   dn->clear_new();
 
   item.first = dn->first;
+
+  // Only in very rare case the dn->alternate_name not empty,
+  // so it won't cost much to copy it here
+  item.alternate_name = dn->get_alternate_name();
 
   // primary or remote?
   if (dn->linkage.is_remote()) {

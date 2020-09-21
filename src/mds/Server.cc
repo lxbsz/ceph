@@ -2247,7 +2247,7 @@ void Server::set_trace_dist(const ref_t<MClientReply> &reply,
     CDir *dir = dn->get_dir();
     CInode *diri = dir->get_inode();
 
-    diri->encode_inodestat(bl, session, NULL, snapid);
+    diri->encode_inodestat(bl, session, NULL, dn->get_alternate_name(), snapid);
     dout(20) << "set_trace_dist added diri " << *diri << dendl;
 
 #ifdef MDS_VERIFY_FRAGSTAT
@@ -2283,7 +2283,7 @@ void Server::set_trace_dist(const ref_t<MClientReply> &reply,
 
   // inode
   if (in) {
-    in->encode_inodestat(bl, session, NULL, snapid, 0, mdr->getattr_caps);
+    in->encode_inodestat(bl, session, NULL, bufferlist(), snapid, 0, mdr->getattr_caps);
     dout(20) << "set_trace_dist added in   " << *in << dendl;
     reply->head.is_target = 1;
   } else
@@ -3211,7 +3211,7 @@ CDentry* Server::prepare_stray_dentry(MDRequestRef& mdr, CInode *in)
  * create a new inode.  set c/m/atime.  hit dir pop.
  */
 CInode* Server::prepare_new_inode(MDRequestRef& mdr, CDir *dir, inodeno_t useino, unsigned mode,
-				  const file_layout_t *layout)
+				  CDentry *dn, const file_layout_t *layout)
 {
   CInode *in = new CInode(mdcache);
   auto _inode = in->_get_inode();
@@ -3300,6 +3300,14 @@ CInode* Server::prepare_new_inode(MDRequestRef& mdr, CDir *dir, inodeno_t useino
     // xattrs on new inode?
     auto _xattrs = CInode::allocate_xattr_map();
     decode_noshare(*_xattrs, p);
+
+    // The "alternate_name" is not a real xattr,
+    // will remove it from the xattrs map.
+    auto it = _xattrs->find("alternate_name");
+    if (it != _xattrs->end()) {
+      dn->set_alternate_name(std::move(it->second));
+      _xattrs->erase(it);
+    }
     dout(10) << "prepare_new_inode setting xattrs " << *_xattrs << dendl;
     in->reset_xattrs(std::move(_xattrs));
   }
@@ -4385,7 +4393,7 @@ void Server::handle_client_openc(MDRequestRef& mdr)
 
   // create inode.
   CInode *newi = prepare_new_inode(mdr, dn->get_dir(), inodeno_t(req->head.ino),
-				   req->head.args.open.mode | S_IFREG, &layout);
+				   req->head.args.open.mode | S_IFREG, dn, &layout);
   ceph_assert(newi);
 
   // it's a file.
@@ -4661,7 +4669,8 @@ void Server::handle_client_readdir(MDRequestRef& mdr)
 
     // inode
     dout(12) << "including inode " << *in << dendl;
-    int r = in->encode_inodestat(dnbl, mdr->session, realm, snapid, bytes_left - (int)dnbl.length());
+    int r = in->encode_inodestat(dnbl, mdr->session, realm, dn->get_alternate_name(),
+                                 snapid, bytes_left - (int)dnbl.length());
     if (r < 0) {
       // chop off dn->name, lease
       dout(10) << " ran out of room, stopping at " << start_len << " < " << bytes_left << dendl;
@@ -6064,7 +6073,8 @@ void Server::handle_client_mknod(MDRequestRef& mdr)
   else
     layout = mdcache->default_file_layout;
 
-  CInode *newi = prepare_new_inode(mdr, dn->get_dir(), inodeno_t(req->head.ino), mode, &layout);
+  CInode *newi = prepare_new_inode(mdr, dn->get_dir(), inodeno_t(req->head.ino),
+                                   mode, dn, &layout);
   ceph_assert(newi);
 
   dn->push_projected_linkage(newi);
@@ -6152,7 +6162,7 @@ void Server::handle_client_mkdir(MDRequestRef& mdr)
   unsigned mode = req->head.args.mkdir.mode;
   mode &= ~S_IFMT;
   mode |= S_IFDIR;
-  CInode *newi = prepare_new_inode(mdr, dir, inodeno_t(req->head.ino), mode);
+  CInode *newi = prepare_new_inode(mdr, dir, inodeno_t(req->head.ino), mode, dn);
   ceph_assert(newi);
 
   // it's a directory.
@@ -6211,6 +6221,24 @@ void Server::handle_client_mkdir(MDRequestRef& mdr)
   mds->balancer->maybe_fragment(dir, false);
 }
 
+void Server::set_dentry_alternate_name(CDentry *dn, const cref_t<MClientRequest>& req)
+{
+  if (!req->get_data().length())
+    return;
+
+  auto p = req->get_data().cbegin();
+
+  // Try to find whether there has a fake xattr named
+  // as "alternate_name"
+  auto _xattrs = CInode::allocate_xattr_map();
+  decode_noshare(*_xattrs, p);
+
+  auto it = _xattrs->find("alternate_name");
+  if (it != _xattrs->end()) {
+    dn->set_alternate_name(std::move(it->second));
+    dout(10) << "dn: " << dn << " has a alternate name!" << dendl;
+  }
+}
 
 // SYMLINK
 
@@ -6231,8 +6259,10 @@ void Server::handle_client_symlink(MDRequestRef& mdr)
 
   const cref_t<MClientRequest> &req = mdr->client_request;
 
+  set_dentry_alternate_name(dn, req);
+
   unsigned mode = S_IFLNK | 0777;
-  CInode *newi = prepare_new_inode(mdr, dir, inodeno_t(req->head.ino), mode);
+  CInode *newi = prepare_new_inode(mdr, dir, inodeno_t(req->head.ino), mode, dn);
   ceph_assert(newi);
 
   // it's a symlink
@@ -6316,6 +6346,8 @@ void Server::handle_client_link(MDRequestRef& mdr)
       respond_to_request(mdr, -EEXIST);
       return;
     }
+
+    set_dentry_alternate_name(destdn, req);
 
     targeti = ret.second->get_projected_linkage()->get_inode();
   }
@@ -7687,7 +7719,6 @@ public:
   }
 };
 
-
 /** handle_client_rename
  *
  * rename leader is the destdn auth.  this is because cached inodes
@@ -7743,6 +7774,8 @@ void Server::handle_client_rename(MDRequestRef& mdr)
     respond_to_request(mdr, -EINVAL);
     return;
   }
+
+  set_dentry_alternate_name(destdn, req);
 
   // is this a stray migration, reintegration or merge? (sanity checks!)
   if (mdr->reqid.name.is_mds() &&
@@ -9885,7 +9918,8 @@ void Server::handle_client_lssnap(MDRequestRef& mdr)
     mds->locker->encode_lease(dnbl, mdr->session->info, e);
     dout(20) << "encode_infinite_lease" << dendl;
 
-    int r = diri->encode_inodestat(dnbl, mdr->session, realm, p->first, max_bytes - (int)dnbl.length());
+    int r = diri->encode_inodestat(dnbl, mdr->session, realm, bufferlist(),
+                                   p->first, max_bytes - (int)dnbl.length());
     if (r < 0) {
       bufferlist keep;
       keep.substr_of(dnbl, 0, start_len);

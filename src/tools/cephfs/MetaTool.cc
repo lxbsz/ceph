@@ -926,9 +926,13 @@ int MetaTool::show_child(std::string_view key,
     inodeno_t ino;
     unsigned char d_type;
     if (type == 'l') {
-      DECODE_START(1, q);
+      bufferlist alternate_name;
+
+      DECODE_START(2, q);
       ::decode(ino, q);
       ::decode(d_type, q);
+      if (struct_v >= 2)
+        decode(alternate_name, q);
       DECODE_FINISH(q);
     } else {
       ::decode(ino, q);
@@ -948,7 +952,11 @@ int MetaTool::show_child(std::string_view key,
     // load inode data before lookuping up or constructing CInode
     InodeStore& inode_data = *(new InodeStore);
     if (type == 'i') {
-      DECODE_START(1, q);
+      bufferlist alternate_name;
+
+      DECODE_START(2, q);
+      if (struct_v >= 2)
+        decode(alternate_name, q);
       inode_data.decode(q);
       DECODE_FINISH(q);
     } else {

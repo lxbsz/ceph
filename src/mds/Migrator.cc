@@ -1796,9 +1796,10 @@ void Migrator::encode_export_dir(bufferlist& exportbl,
       
       inodeno_t ino = dn->get_linkage()->get_remote_ino();
       unsigned char d_type = dn->get_linkage()->get_remote_d_type();
-      ENCODE_START(1, 1, exportbl);
+      ENCODE_START(2, 1, exportbl);
       encode(ino, exportbl);
       encode(d_type, exportbl);
+      encode(dn->get_alternate_name(), exportbl);
       ENCODE_FINISH(exportbl);
       continue;
     }
@@ -1807,7 +1808,8 @@ void Migrator::encode_export_dir(bufferlist& exportbl,
     // -- inode
     exportbl.append("i", 1);    // inode dentry
 
-    ENCODE_START(1, 1, exportbl);
+    ENCODE_START(2, 1, exportbl);
+    encode(dn->get_alternate_name(), exportbl);
     encode_export_inode(in, exportbl, exported_client_map, exported_client_metadata_map);  // encode, and (update state for) export
     ENCODE_FINISH(exportbl);
 
@@ -3452,9 +3454,11 @@ void Migrator::decode_import_dir(bufferlist::const_iterator& blp,
       inodeno_t ino;
       unsigned char d_type;
       if (icode == 'l') {
-        DECODE_START(1, blp);
+        DECODE_START(2, blp);
         decode(ino, blp);
         decode(d_type, blp);
+	if (struct_v >= 2)
+          dn->decode_alternate_name(blp);
         DECODE_FINISH(blp);
       } else {
         decode(ino, blp);
@@ -3470,7 +3474,9 @@ void Migrator::decode_import_dir(bufferlist::const_iterator& blp,
       // inode
       ceph_assert(le);
       if (icode == 'i') {
-        DECODE_START(1, blp);
+        DECODE_START(2, blp);
+	if (struct_v >= 2)
+          dn->decode_alternate_name(blp);
         decode_import_inode(dn, blp, oldauth, ls,
                             peer_exports, updated_scatterlocks);
         DECODE_FINISH(blp);

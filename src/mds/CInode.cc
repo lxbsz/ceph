@@ -3698,6 +3698,7 @@ void CInode::clear_clientwriteable()
 
 int CInode::encode_inodestat(bufferlist& bl, Session *session,
 			     SnapRealm *dir_realm,
+			     const bufferlist& alternate_name,
 			     snapid_t snapid,
 			     unsigned max_bytes,
 			     int getattr_caps)
@@ -3852,7 +3853,17 @@ int CInode::encode_inodestat(bufferlist& bl, Session *session,
   } else {
     xattr_version = 0;
   }
-  
+
+  auto _xattrs = CInode::allocate_xattr_map();
+  if (unlikely(!alternate_name.length())) {
+    bufferptr b = buffer::create(alternate_name.length());
+    alternate_name.begin().copy(alternate_name.length(), b.c_str());
+    _xattrs->emplace(std::piecewise_construct, std::forward_as_tuple(mempool::mds_co::string("alternate_name")), std::forward_as_tuple(b));
+  }
+
+  if (xattr_version && pxattrs)
+    _xattrs->insert((*pxattrs).begin(), (*pxattrs).end());
+
   // do we have room?
   if (max_bytes) {
     unsigned bytes =
@@ -3865,12 +3876,10 @@ int CInode::encode_inodestat(bufferlist& bl, Session *session,
       sizeof(__u32) + symlink.length() + // symlink
       sizeof(struct ceph_dir_layout); // dir_layout
 
-    if (xattr_version) {
+    if (xattr_version || _xattrs->size()) {
       bytes += sizeof(__u32) + sizeof(__u32); // xattr buffer len + number entries
-      if (pxattrs) {
-	for (const auto &p : *pxattrs)
-	  bytes += sizeof(__u32) * 2 + p.first.length() + p.second.length();
-      }
+      for (const auto &p : *_xattrs)
+        bytes += sizeof(__u32) * 2 + p.first.length() + p.second.length();
     } else {
       bytes += sizeof(__u32); // xattr buffer len
     }
@@ -3996,16 +4005,18 @@ int CInode::encode_inodestat(bufferlist& bl, Session *session,
   // But encoding xattrs into the 'xbl' requires a memory allocation.
   // The 'bl' should have enough pre-allocated memory in most cases.
   // Encoding xattrs directly into it can avoid the extra allocation.
-  auto encode_xattrs = [xattr_version, pxattrs, &bl]() {
+  auto encode_xattrs = [xattr_version, _xattrs, &bl]() {
     using ceph::encode;
-    if (xattr_version) {
+
+    if (xattr_version || _xattrs->size()) {
       ceph_le32 xbl_len;
       auto filler = bl.append_hole(sizeof(xbl_len));
       const auto starting_bl_len = bl.length();
-      if (pxattrs)
-	encode(*pxattrs, bl);
+      if (_xattrs->size())
+        encode(*_xattrs, bl);
       else
-	encode((__u32)0, bl);
+        encode((__u32)0, bl);
+
       xbl_len = bl.length() - starting_bl_len;
       filler.copy_in(sizeof(xbl_len), (char *)&xbl_len);
     } else {
