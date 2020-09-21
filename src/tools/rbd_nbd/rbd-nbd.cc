@@ -758,7 +758,11 @@ static int load_module(Config *cfg)
   ostringstream param;
   int ret;
 
-  if (cfg->nbds_max)
+  // If using the netlink method, will set the
+  // nbds_max to 0 as default to fix tracker#47560
+  if (cfg->try_netlink && !cfg->nbds_max)
+    param << "nbds_max=0";
+  else if (cfg->nbds_max)
     param << "nbds_max=" << cfg->nbds_max;
 
   if (cfg->max_part)
