@@ -3211,7 +3211,7 @@ CDentry* Server::prepare_stray_dentry(MDRequestRef& mdr, CInode *in)
  * create a new inode.  set c/m/atime.  hit dir pop.
  */
 CInode* Server::prepare_new_inode(MDRequestRef& mdr, CDir *dir, inodeno_t useino, unsigned mode,
-				  const file_layout_t *layout)
+				  bufferlist &alternate_name, const file_layout_t *layout)
 {
   CInode *in = new CInode(mdcache);
   auto _inode = in->_get_inode();
@@ -3300,6 +3300,14 @@ CInode* Server::prepare_new_inode(MDRequestRef& mdr, CDir *dir, inodeno_t useino
     // xattrs on new inode?
     auto _xattrs = CInode::allocate_xattr_map();
     decode_noshare(*_xattrs, p);
+
+    // The "fscrypt.alternate_name" is not a real
+    // xattr, will remove it from the xattrs map.
+    auto it = _xattrs->find("fscrypt.alternate_name");
+    if (it != _xattrs->end()) {
+      alternate_name.append(it->second);
+      _xattrs->erase(it);
+    }
     dout(10) << "prepare_new_inode setting xattrs " << *_xattrs << dendl;
     in->reset_xattrs(std::move(_xattrs));
   }
@@ -4390,7 +4398,8 @@ void Server::handle_client_openc(MDRequestRef& mdr)
 
   // create inode.
   CInode *newi = prepare_new_inode(mdr, dn->get_dir(), inodeno_t(req->head.ino),
-				   req->head.args.open.mode | S_IFREG, &layout);
+				   req->head.args.open.mode | S_IFREG,
+                                   dn->alternate_name, &layout);
   ceph_assert(newi);
 
   // it's a file.
@@ -6068,7 +6077,8 @@ void Server::handle_client_mknod(MDRequestRef& mdr)
   else
     layout = mdcache->default_file_layout;
 
-  CInode *newi = prepare_new_inode(mdr, dn->get_dir(), inodeno_t(req->head.ino), mode, &layout);
+  CInode *newi = prepare_new_inode(mdr, dn->get_dir(), inodeno_t(req->head.ino),
+                                   mode, dn->alternate_name, &layout);
   ceph_assert(newi);
 
   dn->push_projected_linkage(newi);
@@ -6156,7 +6166,8 @@ void Server::handle_client_mkdir(MDRequestRef& mdr)
   unsigned mode = req->head.args.mkdir.mode;
   mode &= ~S_IFMT;
   mode |= S_IFDIR;
-  CInode *newi = prepare_new_inode(mdr, dir, inodeno_t(req->head.ino), mode);
+  CInode *newi = prepare_new_inode(mdr, dir, inodeno_t(req->head.ino), mode,
+                                   dn->alternate_name);
   ceph_assert(newi);
 
   // it's a directory.
@@ -6236,7 +6247,8 @@ void Server::handle_client_symlink(MDRequestRef& mdr)
   const cref_t<MClientRequest> &req = mdr->client_request;
 
   unsigned mode = S_IFLNK | 0777;
-  CInode *newi = prepare_new_inode(mdr, dir, inodeno_t(req->head.ino), mode);
+  CInode *newi = prepare_new_inode(mdr, dir, inodeno_t(req->head.ino), mode,
+                                   dn->alternate_name);
   ceph_assert(newi);
 
   // it's a symlink

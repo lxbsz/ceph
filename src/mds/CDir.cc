@@ -1850,6 +1850,10 @@ CDentry *CDir::_load_dentry(
       }
     }
 
+    // Always parse the CDentry's fscrypted alternate_name from the end.
+    if (!q.end())
+      decode(dn->alternate_name, q);
+
     if (!dn || undef_inode) {
       // add inode
       CInode *in = mdcache->get_inode(inode_data.inode->ino, last);
@@ -2349,6 +2353,10 @@ void CDir::_encode_dentry(CDentry *dn, bufferlist& bl,
   } else {
     ceph_assert(!dn->linkage.is_null());
   }
+
+  // Always append the CDentry's fscrypted alternate_name at the end.
+  if (dn->alternate_name.length())
+    bl.append(dn->alternate_name);
 }
 
 void CDir::_commit(version_t want, int op_prio)

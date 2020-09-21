@@ -336,6 +336,8 @@ public:
   __u32 hash;
   snapid_t first, last;
 
+  bufferlist alternate_name;
+
   elist<CDentry*>::item item_dirty, item_dir_dirty;
   elist<CDentry*>::item item_stray;
 
