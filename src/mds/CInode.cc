@@ -1578,7 +1578,7 @@ void InodeStoreBase::encode_bare(bufferlist &bl, uint64_t features,
 void InodeStoreBase::encode(bufferlist &bl, uint64_t features,
 			    const bufferlist *snap_blob) const
 {
-  ENCODE_START(6, 4, bl);
+  ENCODE_START(INODE_STORE_BASE_VERSION, INODE_STORE_BASE_COMPAT, bl);
   encode_bare(bl, features, snap_blob);
   ENCODE_FINISH(bl);
 }

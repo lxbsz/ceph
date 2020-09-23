@@ -94,6 +94,9 @@ struct CInodeCommitOperations {
  * handle CInodes from the backing store without hitting all
  * the business logic in CInode proper.
  */
+
+#define INODE_STORE_BASE_VERSION 6
+#define INODE_STORE_BASE_COMPAT  4
 class InodeStoreBase {
 public:
   using mempool_inode = inode_t<mempool::mds_co::pool_allocator>;
