@@ -1761,12 +1761,20 @@ CDentry *CDir::_load_dentry(
   else
     dn = lookup(dname, last);
 
-  if (type == 'L') {
+  if (type == 'L' || type == 'l') {
     // hard link
     inodeno_t ino;
     unsigned char d_type;
-    decode(ino, q);
-    decode(d_type, q);
+
+    if (type == 'l') {
+      DECODE_START(1, q);
+      decode(ino, q);
+      decode(d_type, q);
+      DECODE_FINISH(q);
+    } else {
+      decode(ino, q);
+      decode(d_type, q);
+    }
 
     if (stale) {
       if (!dn) {
@@ -1791,7 +1799,7 @@ CDentry *CDir::_load_dentry(
     } else {
       // (remote) link
       dn = add_remote_dentry(dname, ino, d_type, first, last);
-      
+
       // link to inode?
       CInode *in = mdcache->get_inode(ino);   // we may or may not have it.
       if (in) {
@@ -1801,14 +1809,19 @@ CDentry *CDir::_load_dentry(
         dout(12) << "_fetched  got remote link " << ino << " (don't have it)" << dendl;
       }
     }
-  } 
-  else if (type == 'I') {
-    // inode
-    
-    // Load inode data before looking up or constructing CInode
+  }
+  else if (type == 'I' || type == 'i') {
     InodeStore inode_data;
-    inode_data.decode_bare(q);
-    
+    if (type == 'i') {
+      DECODE_START(1, q);
+    // inode
+    // Load inode data before looking up or constructing CInode
+      inode_data.decode(q);
+      DECODE_FINISH(q);
+    } else {
+      inode_data.decode_bare(q);
+    }
+
     if (stale) {
       if (!dn) {
         stale_items.insert(mempool::mds_co::string(key));
@@ -2319,20 +2332,22 @@ void CDir::_encode_dentry(CDentry *dn, bufferlist& bl,
     inodeno_t ino = dn->linkage.get_remote_ino();
     unsigned char d_type = dn->linkage.get_remote_d_type();
     dout(14) << " pos " << bl.length() << " dn '" << dn->get_name() << "' remote ino " << ino << dendl;
-    
+
     // marker, name, ino
-    bl.append('L');         // remote link
+    bl.append('l');         // remote link
+    ENCODE_START(1, 1, bl);
     encode(ino, bl);
     encode(d_type, bl);
+    ENCODE_FINISH(bl);
   } else if (dn->linkage.is_primary()) {
     // primary link
     CInode *in = dn->linkage.get_inode();
     ceph_assert(in);
-    
+
     dout(14) << " pos " << bl.length() << " dn '" << dn->get_name() << "' inode " << *in << dendl;
-    
+
     // marker, name, inode, [symlink string]
-    bl.append('I');         // inode
+    bl.append('i');         // inode
 
     if (in->is_multiversion()) {
       if (!in->snaprealm) {
@@ -2345,7 +2360,9 @@ void CDir::_encode_dentry(CDentry *dn, bufferlist& bl,
 
     bufferlist snap_blob;
     in->encode_snap_blob(snap_blob);
-    in->encode_bare(bl, mdcache->mds->mdsmap->get_up_features(), &snap_blob);
+    ENCODE_START(1, 1, bl);
+    in->encode(bl, mdcache->mds->mdsmap->get_up_features(), &snap_blob);
+    ENCODE_FINISH(bl);
   } else {
     ceph_assert(!dn->linkage.is_null());
   }
