@@ -711,6 +711,8 @@ protected:
 
   // -- commit --
   void _commit(version_t want, int op_prio);
+  void _encode_primary_inode_base(dentry_commit_item &item, bufferlist &dfts,
+                                  bufferlist &bl);
   void _omap_commit_ops(int r, int op_prio, version_t version, bool _new, bufferlist &bl,
                         vector<dentry_key_t> &to_remove, vector<dentry_commit_item> &to_set,
 			mempool::mds_co::compact_set<mempool::mds_co::string> &_stale);
