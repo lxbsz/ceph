@@ -4397,6 +4397,7 @@ void Server::handle_client_openc(MDRequestRef& mdr)
   dn->push_projected_linkage(newi);
 
   auto _inode = newi->_get_inode();
+  _inode->fscrypt = diri->get_projected_inode()->fscrypt;
   _inode->version = dn->pre_dirty();
   if (layout.pool_id != mdcache->default_file_layout.pool_id)
     _inode->add_old_pool(mdcache->default_file_layout.pool_id);
@@ -5899,6 +5900,8 @@ void Server::handle_client_setxattr(MDRequestRef& mdr)
   pi.inode->ctime = mdr->get_op_stamp();
   if (mdr->get_op_stamp() > pi.inode->rstat.rctime)
     pi.inode->rstat.rctime = mdr->get_op_stamp();
+  if (name == "encryption.ctx"sv)
+    pi.inode->fscrypt = true;
   pi.inode->change_attr++;
   pi.inode->xattr_version++;
   if ((flags & CEPH_XATTR_REMOVE)) {
@@ -6074,6 +6077,7 @@ void Server::handle_client_mknod(MDRequestRef& mdr)
   dn->push_projected_linkage(newi);
 
   auto _inode = newi->_get_inode();
+  _inode->fscrypt = diri->get_projected_inode()->fscrypt;
   _inode->version = dn->pre_dirty();
   _inode->rdev = req->head.args.mknod.rdev;
   _inode->rstat.rfiles = 1;
@@ -6163,6 +6167,7 @@ void Server::handle_client_mkdir(MDRequestRef& mdr)
   dn->push_projected_linkage(newi);
 
   auto _inode = newi->_get_inode();
+  _inode->fscrypt = diri->get_projected_inode()->fscrypt;
   _inode->version = dn->pre_dirty();
   _inode->rstat.rsubdirs = 1;
   _inode->accounted_rstat = _inode->rstat;
@@ -6244,6 +6249,7 @@ void Server::handle_client_symlink(MDRequestRef& mdr)
 
   newi->symlink = req->get_path2();
   auto _inode = newi->_get_inode();
+  _inode->fscrypt = diri->get_projected_inode()->fscrypt;
   _inode->version = dn->pre_dirty();
   _inode->size = newi->symlink.length();
   _inode->rstat.rbytes = _inode->size;

@@ -136,6 +136,8 @@ struct InodeStat {
 
   mds_rank_t dir_pin;
 
+  bool fscrypt = false; // fscrypt enabled ?
+
  public:
   InodeStat() {}
   InodeStat(ceph::buffer::list::const_iterator& p, const uint64_t features) {
@@ -145,7 +147,7 @@ struct InodeStat {
   void decode(ceph::buffer::list::const_iterator &p, const uint64_t features) {
     using ceph::decode;
     if (features == (uint64_t)-1) {
-      DECODE_START(4, p);
+      DECODE_START(5, p);
       decode(vino.ino, p);
       decode(vino.snapid, p);
       decode(rdev, p);
@@ -196,6 +198,9 @@ struct InodeStat {
       if (struct_v >= 4) {
         decode(rstat.rsnaps, p);
       } // else remains zero
+      if (struct_v >= 5) {
+        decode(fscrypt, p);
+      }
       DECODE_FINISH(p);
     }
     else {
