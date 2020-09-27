@@ -983,6 +983,7 @@ Inode * Client::add_update_inode(InodeStat *st, utime_t from,
     in->snap_caps |= st->cap.caps;
   }
 
+  in->fscrypt = st->fscrypt;
   return in;
 }
 
