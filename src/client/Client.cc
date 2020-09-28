@@ -475,7 +475,7 @@ void Client::dump_status(Formatter *f)
     f->dump_stream("inst_str") << inst.name << " " << inst.addr.get_legacy_str();
     f->dump_string("addr_str", inst.addr.get_legacy_str());
     f->dump_int("inode_count", inode_map.size());
-    f->dump_int("mds_epoch", mdsmap->get_epoch());
+    f->dump_int("mds_epoch", get_mdsmap()->get_epoch());
     f->dump_int("osd_epoch", osd_epoch);
     f->dump_int("osd_epoch_barrier", cap_epoch_barrier);
     f->dump_bool("blocklisted", blocklisted);
@@ -1555,10 +1555,11 @@ void Client::connect_mds_targets(mds_rank_t mds)
 {
   ldout(cct, 10) << __func__ << " for mds." << mds << dendl;
   ceph_assert(mds_sessions.count(mds));
-  const MDSMap::mds_info_t& info = mdsmap->get_mds_info(mds);
+  auto _mdsmap = get_mdsmap();
+  const MDSMap::mds_info_t& info = _mdsmap->get_mds_info(mds);
   for (const auto &rank : info.export_targets) {
     if (mds_sessions.count(rank) == 0 &&
-	mdsmap->is_clientreplay_or_active_or_stopping(rank)) {
+	_mdsmap->is_clientreplay_or_active_or_stopping(rank)) {
       ldout(cct, 10) << "check_mds_sessions opening mds." << mds
 		     << " export target mds." << rank << dendl;
       _open_mds_session(rank);
@@ -1580,7 +1581,7 @@ void Client::dump_mds_sessions(Formatter *f, bool cap_dump)
     f->close_section();
   }
   f->close_section();
-  f->dump_int("mdsmap_epoch", mdsmap->get_epoch());
+  f->dump_int("mdsmap_epoch", get_mdsmap()->get_epoch());
 }
 
 void Client::dump_mds_requests(Formatter *f)
@@ -1733,6 +1734,7 @@ int Client::make_request(MetaRequest *request,
     request->resend_mds = use_mds;
 
   MetaSession *session = NULL;
+  auto _mdsmap = get_mdsmap();
   while (1) {
     if (request->aborted())
       break;
@@ -1749,9 +1751,9 @@ int Client::make_request(MetaRequest *request,
     // choose mds
     Inode *hash_diri = NULL;
     mds_rank_t mds = choose_target_mds(request, &hash_diri);
-    int mds_state = (mds == MDS_RANK_NONE) ? MDSMap::STATE_NULL : mdsmap->get_state(mds);
+    int mds_state = (mds == MDS_RANK_NONE) ? MDSMap::STATE_NULL : _mdsmap->get_state(mds);
     if (mds_state != MDSMap::STATE_ACTIVE && mds_state != MDSMap::STATE_STOPPING) {
-      if (mds_state == MDSMap::STATE_NULL && mds >= mdsmap->get_max_mds()) {
+      if (mds_state == MDSMap::STATE_NULL && mds >= _mdsmap->get_max_mds()) {
 	if (hash_diri) {
 	  ldout(cct, 10) << " target mds." << mds << " has stopped, remove it from fragmap" << dendl;
 	  _fragmap_remove_stopped_mds(hash_diri, mds);
@@ -1762,6 +1764,7 @@ int Client::make_request(MetaRequest *request,
       } else {
 	ldout(cct, 10) << " target mds." << mds << " not active, waiting for new mdsmap" << dendl;
 	wait_on_list(waiting_for_mdsmap);
+        _mdsmap = get_mdsmap();
       }
       continue;
     }
@@ -2078,7 +2081,7 @@ void Client::update_metadata(std::string const &k, std::string const &v)
 MetaSession *Client::_open_mds_session(mds_rank_t mds)
 {
   ldout(cct, 10) << __func__ << " mds." << mds << dendl;
-  auto addrs = mdsmap->get_addrs(mds);
+  auto addrs = get_mdsmap()->get_addrs(mds);
   auto em = mds_sessions.emplace(std::piecewise_construct,
       std::forward_as_tuple(mds),
       std::forward_as_tuple(mds, messenger->connect_to_mds(addrs), addrs));
@@ -2161,7 +2164,7 @@ void Client::handle_client_session(const MConstRef<MClientSession>& m)
     if (session->cap_renew_seq == m->get_seq()) {
       bool was_stale = ceph_clock_now() >= session->cap_ttl;
       session->cap_ttl =
-	session->last_cap_renew_request + mdsmap->get_session_timeout();
+	session->last_cap_renew_request + get_mdsmap()->get_session_timeout();
       if (was_stale)
 	wake_up_session_caps(session, false);
     }
@@ -2261,7 +2264,7 @@ void Client::send_request(MetaRequest *request, MetaSession *session,
     else
       r->releases.swap(request->cap_releases);
   }
-  r->set_mdsmap_epoch(mdsmap->get_epoch());
+  r->set_mdsmap_epoch(get_mdsmap()->get_epoch());
   if (r->head.op == CEPH_MDS_OP_SETXATTR) {
     objecter->with_osdmap([r](const OSDMap& o) {
 	r->set_osdmap_epoch(o.get_epoch());
@@ -2718,15 +2721,16 @@ void Client::handle_fs_map_user(const MConstRef<MFSMapUser>& m)
 }
 
 // Cancel all the commands for missing or laggy GIDs
-void Client::cancel_commands(const MDSMap& newmap)
+void Client::cancel_commands()
 {
+  auto _mdsmap = get_mdsmap();
   std::vector<ceph_tid_t> cancel_ops;
 
   std::scoped_lock cmd_lock(command_lock);
   auto &commands = command_table.get_commands();
   for (const auto &[tid, op] : commands) {
     const mds_gid_t op_mds_gid = op.mds_gid;
-    if (newmap.is_dne_gid(op_mds_gid) || newmap.is_laggy_gid(op_mds_gid)) {
+    if (_mdsmap->is_dne_gid(op_mds_gid) || _mdsmap->is_laggy_gid(op_mds_gid)) {
       ldout(cct, 1) << __func__ << ": cancelling command op " << tid << dendl;
       cancel_ops.push_back(tid);
       if (op.outs) {
@@ -2753,43 +2757,40 @@ void Client::handle_mds_map(const MConstRef<MMDSMap>& m)
 {
   mds_gid_t old_inc, new_inc;
 
-  std::unique_lock cl(client_lock);
-  if (m->get_epoch() <= mdsmap->get_epoch()) {
+  auto oldmap = get_mdsmap();
+  if (m->get_epoch() <= oldmap->get_epoch()) {
     ldout(cct, 1) << __func__ << " epoch " << m->get_epoch()
                   << " is identical to or older than our "
-                  << mdsmap->get_epoch() << dendl;
+                  << oldmap->get_epoch() << dendl;
     return;
   }
 
-  cl.unlock();
   ldout(cct, 1) << __func__ << " epoch " << m->get_epoch() << dendl;
-  std::unique_ptr<MDSMap> _mdsmap(new MDSMap);
-  _mdsmap->decode(m->get_encoded());
-  cancel_commands(*_mdsmap.get());
-  cl.lock();
+  set_mdsmap(m->get_encoded());
+  cancel_commands();
+  auto newmap = get_mdsmap();
 
-  _mdsmap.swap(mdsmap);
-
+  std::unique_lock cl(client_lock);
   // reset session
   for (auto p = mds_sessions.begin(); p != mds_sessions.end(); ) {
     mds_rank_t mds = p->first;
     MetaSession *session = &p->second;
     ++p;
 
-    int oldstate = _mdsmap->get_state(mds);
-    int newstate = mdsmap->get_state(mds);
-    if (!mdsmap->is_up(mds)) {
+    int oldstate = oldmap->get_state(mds);
+    int newstate = newmap->get_state(mds);
+    if (!newmap->is_up(mds)) {
       session->con->mark_down();
-    } else if (mdsmap->get_addrs(mds) != session->addrs) {
-      old_inc = _mdsmap->get_incarnation(mds);
-      new_inc = mdsmap->get_incarnation(mds);
+    } else if (newmap->get_addrs(mds) != session->addrs) {
+      old_inc = oldmap->get_incarnation(mds);
+      new_inc = newmap->get_incarnation(mds);
       if (old_inc != new_inc) {
         ldout(cct, 1) << "mds incarnation changed from "
 		      << old_inc << " to " << new_inc << dendl;
         oldstate = MDSMap::STATE_NULL;
       }
       session->con->mark_down();
-      session->addrs = mdsmap->get_addrs(mds);
+      session->addrs = newmap->get_addrs(mds);
       // When new MDS starts to take over, notify kernel to trim unused entries
       // in its dcache/icache. Hopefully, the kernel will release some unused
       // inodes before the new MDS enters reconnect state.
@@ -2818,7 +2819,7 @@ void Client::handle_mds_map(const MConstRef<MMDSMap>& m)
 	connect_mds_targets(mds);
       }
     } else if (newstate == MDSMap::STATE_NULL &&
-	       mds >= mdsmap->get_max_mds()) {
+	       mds >= newmap->get_max_mds()) {
       _closed_mds_session(session);
     }
   }
@@ -2826,7 +2827,7 @@ void Client::handle_mds_map(const MConstRef<MMDSMap>& m)
   // kick any waiting threads
   signal_cond_list(waiting_for_mdsmap);
 
-  monclient->sub_got("mdsmap", mdsmap->get_epoch());
+  monclient->sub_got("mdsmap", newmap->get_epoch());
 }
 
 void Client::send_reconnect(MetaSession *session)
@@ -6078,14 +6079,15 @@ int Client::mount(const std::string &mount_root, const UserPerm& perms,
 
   cl.unlock();
   tick(); // start tick
+  auto _mdsmap = get_mdsmap();
   cl.lock();
 
   if (require_mds) {
     while (1) {
-      auto availability = mdsmap->is_cluster_available();
+      auto availability = _mdsmap->is_cluster_available();
       if (availability == MDSMap::STUCK_UNAVAILABLE) {
         // Error out
-        ldout(cct, 10) << "mds cluster unavailable: epoch=" << mdsmap->get_epoch() << dendl;
+        ldout(cct, 10) << "mds cluster unavailable: epoch=" << _mdsmap->get_epoch() << dendl;
         return CEPH_FUSE_NO_MDS_UP;
       } else if (availability == MDSMap::AVAILABLE) {
         // Continue to mount
@@ -6093,7 +6095,10 @@ int Client::mount(const std::string &mount_root, const UserPerm& perms,
       } else if (availability == MDSMap::TRANSIENT_UNAVAILABLE) {
         // Else, wait.  MDSMonitor will update the map to bring
         // us to a conclusion eventually.
+        cl.lock();
         wait_on_list(waiting_for_mdsmap);
+        cl.unlock();
+        _mdsmap = get_mdsmap();
       } else {
         // Unexpected value!
         ceph_abort();
@@ -6403,9 +6408,10 @@ void Client::abort_conn()
 void Client::flush_cap_releases()
 {
   // send any cap releases
+  auto _mdsmap = get_mdsmap();
   for (auto &p : mds_sessions) {
     auto &session = p.second;
-    if (session.release && mdsmap->is_clientreplay_or_active_or_stopping(
+    if (session.release && _mdsmap->is_clientreplay_or_active_or_stopping(
           p.first)) {
       if (cct->_conf->client_inject_release_failure) {
         ldout(cct, 20) << __func__ << " injecting failure to send cap release message" << dendl;
@@ -6438,6 +6444,7 @@ void Client::tick()
 
   utime_t now = ceph_clock_now();
 
+  auto _mdsmap = get_mdsmap();
   std::scoped_lock cl(client_lock);
   /*
    * If the mount() is not finished
@@ -6457,10 +6464,10 @@ void Client::tick()
     }
   }
 
-  if (!mount_aborted && mdsmap->get_epoch()) {
+  if (!mount_aborted && _mdsmap->get_epoch()) {
     // renew caps?
     utime_t el = now - last_cap_renew;
-    if (el > mdsmap->get_session_timeout() / 3.0)
+    if (el > _mdsmap->get_session_timeout() / 3.0)
       renew_caps();
 
     flush_cap_releases();
@@ -6548,9 +6555,10 @@ void Client::renew_caps()
   ldout(cct, 10) << "renew_caps()" << dendl;
   last_cap_renew = ceph_clock_now();
 
+  auto _mdsmap = get_mdsmap();
   for (auto &p : mds_sessions) {
     ldout(cct, 15) << "renew_caps requesting from mds." << p.first << dendl;
-    if (mdsmap->get_state(p.first) >= MDSMap::STATE_REJOIN)
+    if (_mdsmap->get_state(p.first) >= MDSMap::STATE_REJOIN)
       renew_caps(&p.second);
   }
 }
@@ -6603,7 +6611,8 @@ int Client::_lookup(Inode *dir, const string& dname, int mask, InodeRef *target,
       req->set_filepath(path);
 
       InodeRef tmptarget;
-      int r = make_request(req, perms, &tmptarget, NULL, rand() % mdsmap->get_num_in_mds());
+      int r = make_request(req, perms, &tmptarget, NULL,
+                           rand() % get_mdsmap()->get_num_in_mds());
 
       if (r == 0) {
 	Inode *tempino = tmptarget.get();
@@ -7350,7 +7359,7 @@ force_request:
       CEPH_CAP_FILE_WR;
   }
   if (mask & CEPH_SETATTR_SIZE) {
-    if ((unsigned long)stx->stx_size < mdsmap->get_max_filesize()) {
+    if ((unsigned long)stx->stx_size < get_mdsmap()->get_max_filesize()) {
       req->head.args.setattr.size = stx->stx_size;
       ldout(cct,10) << "changing size to " << stx->stx_size << dendl;
     } else { //too big!
@@ -8927,7 +8936,7 @@ int Client::lookup_hash(inodeno_t ino, inodeno_t dirino, const char *name,
   req->set_filepath2(path2);
 
   int r = make_request(req, perms, NULL, NULL,
-		       rand() % mdsmap->get_num_in_mds());
+		       rand() % get_mdsmap()->get_num_in_mds());
   ldout(cct, 3) << __func__ << " exit(" << ino << ", #" << dirino << "/" << name << ") = " << r << dendl;
   return r;
 }
@@ -8952,7 +8961,8 @@ int Client::_lookup_ino(inodeno_t ino, const UserPerm& perms, Inode **inode)
   filepath path(ino);
   req->set_filepath(path);
 
-  int r = make_request(req, perms, NULL, NULL, rand() % mdsmap->get_num_in_mds());
+  int r = make_request(req, perms, NULL, NULL,
+                       rand() % get_mdsmap()->get_num_in_mds());
   if (r == 0 && inode != NULL) {
     vinodeno_t vino(ino, CEPH_NOSNAP);
     unordered_map<vinodeno_t,Inode*>::iterator p = inode_map.find(vino);
@@ -8984,7 +8994,8 @@ int Client::_lookup_parent(Inode *ino, const UserPerm& perms, Inode **parent)
   req->set_filepath(path);
 
   InodeRef target;
-  int r = make_request(req, perms, &target, NULL, rand() % mdsmap->get_num_in_mds());
+  int r = make_request(req, perms, &target, NULL,
+                       rand() % get_mdsmap()->get_num_in_mds());
   // Give caller a reference to the parent ino if they provided a pointer.
   if (parent != NULL) {
     if (r == 0) {
@@ -9017,7 +9028,7 @@ int Client::_lookup_name(Inode *ino, Inode *parent, const UserPerm& perms)
   req->set_filepath(filepath(ino->ino));
   req->set_inode(ino);
 
-  int r = make_request(req, perms, NULL, NULL, rand() % mdsmap->get_num_in_mds());
+  int r = make_request(req, perms, NULL, NULL, rand() % get_mdsmap()->get_num_in_mds());
   ldout(cct, 3) << __func__ << " exit(" << ino->ino << ") = " << r << dendl;
   return r;
 }
@@ -9852,7 +9863,7 @@ int64_t Client::_write(Fh *f, int64_t offset, uint64_t size, const char *buf,
 
   uint64_t fpos = 0;
 
-  if ((uint64_t)(offset+size) > mdsmap->get_max_filesize()) //too large!
+  if ((uint64_t)(offset+size) > get_mdsmap()->get_max_filesize()) //too large!
     return -EFBIG;
 
   //ldout(cct, 7) << "write fh " << fh << " size " << size << " offset " << offset << dendl;
@@ -10383,7 +10394,7 @@ int Client::statfs(const char *path, struct statvfs *stbuf,
   C_SaferCond cond;
 
   std::unique_lock lock(client_lock);
-  const vector<int64_t> &data_pools = mdsmap->get_data_pools();
+  const vector<int64_t> &data_pools = get_mdsmap()->get_data_pools();
   if (data_pools.size() == 1) {
     objecter->get_fs_stats(stats, data_pools[0], &cond);
   } else {
@@ -14158,7 +14169,7 @@ int Client::set_deleg_timeout(uint32_t timeout)
    * The whole point is to prevent blocklisting so we must time out the
    * delegation before the session autoclose timeout kicks in.
    */
-  if (timeout >= mdsmap->get_session_autoclose())
+  if (timeout >= get_mdsmap()->get_session_autoclose())
     return -EINVAL;
 
   deleg_timeout = timeout;
@@ -14271,7 +14282,7 @@ int64_t Client::get_default_pool_id()
   std::scoped_lock lock(client_lock);
 
   /* first data pool is the default */ 
-  return mdsmap->get_first_data_pool(); 
+  return get_mdsmap()->get_first_data_pool(); 
 }
 
 // expose osdmap
@@ -14497,7 +14508,7 @@ void Client::ms_handle_remote_reset(Connection *con)
       mds_rank_t mds = MDS_RANK_NONE;
       MetaSession *s = NULL;
       for (auto &p : mds_sessions) {
-	if (mdsmap->get_addrs(p.first) == con->get_peer_addrs()) {
+	if (get_mdsmap()->get_addrs(p.first) == con->get_peer_addrs()) {
 	  mds = p.first;
 	  s = &p.second;
 	}
@@ -14899,14 +14910,16 @@ int Client::start_reclaim(const std::string& uuid, unsigned flags,
   if (metadata.empty())
     populate_metadata("");
 
-  while (mdsmap->get_epoch() == 0)
+  while (get_mdsmap()->get_epoch() == 0)
     wait_on_list(waiting_for_mdsmap);
 
+  auto _mdsmap = get_mdsmap();
   reclaim_errno = 0;
-  for (unsigned mds = 0; mds < mdsmap->get_num_in_mds(); ) {
-    if (!mdsmap->is_up(mds)) {
+  for (unsigned mds = 0; mds < _mdsmap->get_num_in_mds(); ) {
+    if (!_mdsmap->is_up(mds)) {
       ldout(cct, 10) << "mds." << mds << " not active, waiting for new mdsmap" << dendl;
       wait_on_list(waiting_for_mdsmap);
+      _mdsmap = get_mdsmap();
       continue;
     }
 
@@ -15074,7 +15087,7 @@ mds_rank_t Client::_get_random_up_mds() const
   ceph_assert(ceph_mutex_is_locked_by_me(client_lock));
 
   std::set<mds_rank_t> up;
-  mdsmap->get_up_mds_set(up);
+  get_mdsmap()->get_up_mds_set(up);
 
   if (up.empty())
     return MDS_RANK_NONE;

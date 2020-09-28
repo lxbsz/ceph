@@ -616,7 +616,7 @@ public:
   virtual void shutdown();
 
   // messaging
-  void cancel_commands(const MDSMap& newmap);
+  void cancel_commands();
   void handle_mds_map(const MConstRef<MMDSMap>& m);
   void handle_fs_map(const MConstRef<MFSMap>& m);
   void handle_fs_map_user(const MConstRef<MFSMapUser>& m);
@@ -751,13 +751,22 @@ public:
 
   xlist<Inode*> &get_dirty_list() { return dirty_list; }
 
+  void set_mdsmap(const bufferlist &bl) {
+    std::shared_ptr<MDSMap> _mdsmap(new MDSMap);
+    _mdsmap->decode(bl);
+    atomic_store_explicit(&mdsmap, std::move(_mdsmap), std::memory_order_relaxed);
+  }
+  std::shared_ptr<MDSMap> get_mdsmap() const {
+    auto _mdsmap = atomic_load_explicit(&mdsmap, std::memory_order_relaxed);
+    return _mdsmap;
+  }
+
   /* timer_lock for 'timer' and 'tick_event' */
   ceph::mutex timer_lock = ceph::make_mutex("Client::timer_lock");
   Context *tick_event = nullptr;
   SafeTimer timer;
 
   std::unique_ptr<PerfCounters> logger;
-  std::unique_ptr<MDSMap> mdsmap;
 
   bool fuse_default_permissions;
 
@@ -1357,6 +1366,7 @@ private:
   std::list<ceph::condition_variable*> waiting_for_fsmap;
   std::unique_ptr<FSMap> fsmap;
   std::unique_ptr<FSMapUser> fsmap_user;
+  std::shared_ptr<MDSMap> mdsmap;
 
   // This mutex only protects command_table
   ceph::mutex command_lock = ceph::make_mutex("Client::command_lock");
