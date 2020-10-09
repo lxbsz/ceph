@@ -1,5 +1,5 @@
 """
-Run ceph-iscsi tests
+Run ceph-iscsi cluster setup
 """
 import logging
 import socket
@@ -7,6 +7,7 @@ import re
 from io import StringIO
 from teuthology.exceptions import CommandFailedError
 from teuthology.orchestra import run
+from textwrap import dedent
 
 log = logging.getLogger(__name__)
 
@@ -51,7 +52,7 @@ class IscsiSetup(object):
         # setup the iscsi-gateway.cfg file, we only set the
         # clust_name and trusted_ip_list and all the others
         # as default
-        target = "/etc/ceph/iscsi-gateway.cfg"
+        target = "/etc/ceph/ceph.conf"
         self._get_trusted_ip_list(remote, target)
 
         args = ['sudo', 'echo', 'cluster_name = ceph', run.Raw('>'), target]
@@ -78,39 +79,56 @@ class IscsiSetup(object):
         """Spawned task that setups the gateway"""
         (remote,) = self.ctx.cluster.only(role).remotes.keys()
 
-        # setup the iscsi-gateway.cfg file, we only set the
-        # clust_name and trusted_ip_list and all the others
-        # as default
         target = "/etc/iscsi/initiatorname.iscsi"
-        args = ['sudo', 'echo', f'InitiatorName={self.client_iqn}', run.Raw('>'), target]
-        remote.run(args=args)
+        remote.run(args=['sudo', 'echo', f'InitiatorName={self.client_iqn}', run.Raw('>'), target]a)
+        # the restart is needed after the above change is applied
+        remote.run(args=['sudo', 'systemctl', 'restart', 'iscsid'])
+
+        remote.run(args=['sudo', 'modprobe', 'dm_multipath'])
+        remote.run(args=['sudo', 'mpathconf', '--enable'])
+        conf = dedent('''\
+devices {
+        device {
+                vendor "LIO-ORG"
+                user_friendly_names "yes" # names like mpatha
+                path_grouping_policy "failover" # one path per group
+                hardware_handler "1 alua"
+                path_selector "round-robin 0"
+                failback immediate
+                path_checker "tur"
+                prio "alua"
+                no_path_retry 120
+                rr_weight "uniform"
+        }
+}
+''')
+        path = "/etc/multipath.conf"
+        remote.sudo_write_file(path, conf, append=True)
+        remote.run(args=['sudo', 'systemctl', 'start', 'multipathd'])
 
     def setup_clients(self):
         for role in self.config['clients']:
             self._setup_client(role)
 
-    def check_status(self, remote, check='iscsi-targets', reverse=False):
-        raise NotImplementedError()
+@contextlib.contextmanager
+def task(ctx, config):
+    """
+    Run fsx on an rbd image.
 
-    def run_ls(self, remote):
-        self.check_status(remote)
+    Currently this requires running as client.admin
+    to create a pool.
 
-    def run_create(self, remote):
-        raise NotImplementedError()
+    Specify the list of gateways to run ::
 
-    def run_delete(self, remote):
-        raise NotImplementedError()
+      tasks:
+        ceph_iscsi:
+          gateways: [gateway.0, gateway.1]
+          clients: [client.0]
 
-    def run_test(self):
-        """Spawned task that runs the gateway"""
-        role = self.config['gateways'][0]
-        (remote,) = self.ctx.cluster.only(role).remotes.keys()
+    """
+    log.info('setting iscsi cluster...')
+    iscsi = IscsiSetup(ctx, config)
+    iscsi.setup_gateways()
+    iscsi.setup_clients()
 
-        # gwcli ls
-        self.run_ls(remote)
-
-        # gwcli create
-        self.run_create(remote)
-
-        # gwcli delete
-        self.run_delete(remote)
+    yield
