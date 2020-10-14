@@ -58,7 +58,7 @@ if type cmake3 > /dev/null 2>&1 ; then
 else
     CMAKE=cmake
 fi
-${CMAKE} $ARGS "$@" $CEPH_GIT_DIR || exit 1
+NODE_MIRROR=https://npm.taobao.org/mirrors/node NPM_REGISTRY=https://registry.npm.taobao.org ${CMAKE} $ARGS "$@" $CEPH_GIT_DIR || exit 1
 set +x
 
 # minimal config to find plugins
