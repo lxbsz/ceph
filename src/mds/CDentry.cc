@@ -235,6 +235,12 @@ void CDentry::make_path(filepath& fp, bool projected) const
   fp.push_dentry(get_name());
 }
 
+void CDentry::set_alternate_name(bufferptr &&cipher)
+{
+  dout(10) << "setting alternate_name on " << *this << dendl;
+  alternate_name = std::move(cipher.c_str());
+}
+
 /*
  * we only add ourselves to remote_parents when the linkage is
  * active (no longer projected).  if the passed dnl is projected,

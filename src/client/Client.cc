@@ -833,7 +833,7 @@ void Client::_fragmap_remove_stopped_mds(Inode *in, mds_rank_t mds)
 Inode * Client::add_update_inode(InodeStat *st, utime_t from,
 				 MetaSession *session,
 				 const UserPerm& request_perms,
-				 bufferlist& alternate_name)
+				 mempool::mds_co::string& alternate_name)
 {
   Inode *in;
   bool was_new = false;
@@ -933,7 +933,7 @@ Inode * Client::add_update_inode(InodeStat *st, utime_t from,
     decode(in->xattrs, p);
     // remove the fake attribute
     if (in->xattrs.count("alternate_name")) {
-      alternate_name.append(std::move(in->xattrs["alternate_name"]));
+      alternate_name = std::move(in->xattrs["alternate_name"].c_str());
       in->xattrs.erase("alternate_name");
     }
     in->xattr_version = st->xattr_version;
@@ -999,7 +999,8 @@ Inode * Client::add_update_inode(InodeStat *st, utime_t from,
  */
 Dentry *Client::insert_dentry_inode(Dir *dir, const string& dname, LeaseStat *dlease, 
 				    Inode *in, utime_t from, MetaSession *session,
-				    bufferlist& alternate_name, Dentry *old_dentry)
+				    mempool::mds_co::string& alternate_name,
+                                    Dentry *old_dentry)
 {
   Dentry *dn = NULL;
   if (dir->dentries.count(dname))
@@ -1206,7 +1207,7 @@ void Client::insert_readdir_results(MetaRequest *request, MetaSession *session, 
 
       ldout(cct, 15) << "" << i << ": '" << dname << "'" << dendl;
 
-      bufferlist alternate_name;
+      mempool::mds_co::string alternate_name;
       Inode *in = add_update_inode(&ist, request->sent_stamp, session,
 				   request->perms, alternate_name);
       Dentry *dn;
@@ -1226,7 +1227,7 @@ void Client::insert_readdir_results(MetaRequest *request, MetaSession *session, 
 	// new dn
 	dn = link(dir, dname, in, NULL);
       }
-      dn->alternate_name.claim_append(alternate_name);
+      dn->alternate_name = std::move(alternate_name);
 
       update_dentry_lease(dn, &dlease, request->sent_stamp, session);
       if (hash_order) {
@@ -1356,7 +1357,7 @@ Inode* Client::insert_trace(MetaRequest *request, MetaSession *session)
   }
 
   Inode *in = 0;
-  bufferlist alternate_name;
+  mempool::mds_co::string alternate_name;
   if (reply->head.is_target) {
     ist.decode(p, features);
     if (cct->_conf->client_debug_getattr_caps) {
@@ -1377,7 +1378,7 @@ Inode* Client::insert_trace(MetaRequest *request, MetaSession *session)
 
   Inode *diri = NULL;
   if (reply->head.is_dentry) {
-    bufferlist dir_alternate_name;
+    mempool::mds_co::string dir_alternate_name;
     diri = add_update_inode(&dirst, request->sent_stamp, session,
 			    request->perms, dir_alternate_name);
     update_dir_dist(diri, &dst);  // dir stat info is attached to ..

@@ -3698,7 +3698,7 @@ void CInode::clear_clientwriteable()
 
 int CInode::encode_inodestat(bufferlist& bl, Session *session,
 			     SnapRealm *dir_realm,
-			     const bufferlist& alternate_name,
+			     std::string_view alternate_name,
 			     snapid_t snapid,
 			     unsigned max_bytes,
 			     int getattr_caps)
@@ -3855,9 +3855,9 @@ int CInode::encode_inodestat(bufferlist& bl, Session *session,
   }
 
   auto _xattrs = CInode::allocate_xattr_map();
-  if (unlikely(!alternate_name.length())) {
+  if (unlikely(alternate_name.length())) {
     bufferptr b = buffer::create(alternate_name.length());
-    alternate_name.begin().copy(alternate_name.length(), b.c_str());
+    alternate_name.copy(b.c_str(), alternate_name.length());
     _xattrs->emplace(std::piecewise_construct, std::forward_as_tuple(mempool::mds_co::string("alternate_name")), std::forward_as_tuple(b));
   }
 

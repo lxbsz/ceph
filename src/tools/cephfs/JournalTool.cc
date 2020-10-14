@@ -837,7 +837,7 @@ int JournalTool::recover_dentries(
           // Read out inode version to compare with backing store
           InodeStore inode;
           if (dentry_type == 'i') {
-	    bufferlist alternate_name;
+	    mempool::mds_co::string alternate_name;
 
             DECODE_START(2, q);
             if (struct_v >= 2)

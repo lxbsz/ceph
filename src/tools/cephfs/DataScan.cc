@@ -990,7 +990,7 @@ int DataScan::scan_links()
 	  }
 	  char dentry_type;
 	  decode(dentry_type, q);
-	  bufferlist alternate_name;
+	  mempool::mds_co::string alternate_name;
 	  if (dentry_type == 'I' || dentry_type == 'i') {
 	    InodeStore inode;
             if (dentry_type == 'i') {
@@ -1494,7 +1494,7 @@ int MetadataTool::read_dentry(inodeno_t parent_ino, frag_t frag,
     decode(dentry_type, q);
     if (dentry_type == 'I' || dentry_type == 'i') {
       if (dentry_type == 'i') {
-        bufferlist alternate_name;
+        mempool::mds_co::string alternate_name;
 
         DECODE_START(2, q);
         if (struct_v >= 2)

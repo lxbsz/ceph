@@ -2283,7 +2283,7 @@ void Server::set_trace_dist(const ref_t<MClientReply> &reply,
 
   // inode
   if (in) {
-    in->encode_inodestat(bl, session, NULL, bufferlist(), snapid, 0, mdr->getattr_caps);
+    in->encode_inodestat(bl, session, NULL, std::string_view(), snapid, 0, mdr->getattr_caps);
     dout(20) << "set_trace_dist added in   " << *in << dendl;
     reply->head.is_target = 1;
   } else
@@ -6234,10 +6234,8 @@ void Server::set_dentry_alternate_name(CDentry *dn, const cref_t<MClientRequest>
   decode_noshare(*_xattrs, p);
 
   auto it = _xattrs->find("alternate_name");
-  if (it != _xattrs->end()) {
+  if (it != _xattrs->end())
     dn->set_alternate_name(std::move(it->second));
-    dout(10) << "dn: " << dn << " has a alternate name!" << dendl;
-  }
 }
 
 // SYMLINK
@@ -9918,7 +9916,7 @@ void Server::handle_client_lssnap(MDRequestRef& mdr)
     mds->locker->encode_lease(dnbl, mdr->session->info, e);
     dout(20) << "encode_infinite_lease" << dendl;
 
-    int r = diri->encode_inodestat(dnbl, mdr->session, realm, bufferlist(),
+    int r = diri->encode_inodestat(dnbl, mdr->session, realm, std::string_view(),
                                    p->first, max_bytes - (int)dnbl.length());
     if (r < 0) {
       bufferlist keep;

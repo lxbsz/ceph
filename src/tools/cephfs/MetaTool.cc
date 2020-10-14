@@ -926,7 +926,7 @@ int MetaTool::show_child(std::string_view key,
     inodeno_t ino;
     unsigned char d_type;
     if (type == 'l') {
-      bufferlist alternate_name;
+      mempool::mds_co::string alternate_name;
 
       DECODE_START(2, q);
       ::decode(ino, q);
@@ -952,7 +952,7 @@ int MetaTool::show_child(std::string_view key,
     // load inode data before lookuping up or constructing CInode
     InodeStore& inode_data = *(new InodeStore);
     if (type == 'i') {
-      bufferlist alternate_name;
+      mempool::mds_co::string alternate_name;
 
       DECODE_START(2, q);
       if (struct_v >= 2)
