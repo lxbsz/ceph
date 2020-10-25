@@ -1140,7 +1140,8 @@ Option::value_t md_config_t::_expand_meta(
   const Option::value_t& in,
   const Option *o,
   expand_stack_t *stack,
-  std::ostream *err) const
+  std::ostream *err,
+  bool no_pid) const
 {
   //cout << __func__ << " in '" << in << "' stack " << stack << std::endl;
   if (!stack) {
@@ -1163,9 +1164,15 @@ Option::value_t md_config_t::_expand_meta(
   }
   string out;
   decltype(pos) last_pos = 0;
+  bool skip_pid = false;
   while (pos != std::string::npos) {
     ceph_assert((*str)[pos] == '$');
     if (pos > last_pos) {
+      // skip extra '.'
+      if (skip_pid && str->at(0) == '.' && out.at(out.length() - 1) == '.')
+        last_pos++;
+      if (skip_pid)
+        skip_pid = false;
       out += str->substr(last_pos, pos - last_pos);
     }
 
@@ -1214,10 +1221,14 @@ Option::value_t md_config_t::_expand_meta(
       } else if (var == "id") {
 	out += values.name.get_id();
       } else if (var == "pid") {
-	out += stringify(getpid());
-        if (o) {
-          may_reexpand_meta[o->name] = *str;
-        }
+        if (no_pid) {
+          skip_pid = true;
+        } else {
+          out += stringify(getpid());
+          if (o) {
+            may_reexpand_meta[o->name] = *str;
+          }
+	}
       } else if (var == "cctid") {
 	out += stringify((unsigned long long)this);
       } else if (var == "home") {
@@ -1260,6 +1271,9 @@ Option::value_t md_config_t::_expand_meta(
     pos = str->find('$', last_pos);
   }
   if (last_pos != std::string::npos) {
+    // skip extra '.'
+    if (skip_pid && str->at(0) == '.' && out.at(out.length() - 1) == '.')
+      last_pos++;
     out += str->substr(last_pos);
   }
   if (o) {
@@ -1344,7 +1358,7 @@ int md_config_t::get_val_from_conf_file(
   }
   if (emeta) {
     expand_stack_t stack;
-    auto v = _expand_meta(values, Option::value_t(out), nullptr, &stack, nullptr);
+    auto v = _expand_meta(values, Option::value_t(out), nullptr, &stack, nullptr, true);
     conf_stringify(v, &out);
   }
   return 0;

@@ -304,7 +304,7 @@ private:
     const Option::value_t& in,
     const Option *o,
     expand_stack_t *stack,
-    std::ostream *err) const;
+    std::ostream *err, bool no_pid=false) const;
 
 public:  // for global_init
   void early_expand_meta(const ConfigValues& values,
