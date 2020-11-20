@@ -1767,15 +1767,7 @@ CDentry *CDir::_load_dentry(
     inodeno_t ino;
     unsigned char d_type;
 
-    if (type == 'l') {
-      DECODE_START(1, q);
-      decode(ino, q);
-      decode(d_type, q);
-      DECODE_FINISH(q);
-    } else {
-      decode(ino, q);
-      decode(d_type, q);
-    }
+    CDentry::decode_remote(type, ino, d_type, q);
 
     if (stale) {
       if (!dn) {
@@ -2329,12 +2321,7 @@ void CDir::_omap_commit_ops(int r, int op_prio, version_t version, bool _new, bu
 
     encode(item.first, bl);
     if (item.is_remote) {
-      // marker, name, ino
-      bl.append('l');         // remote link
-      ENCODE_START(1, 1, bl);
-      encode(item.ino, bl);
-      encode(item.d_type, bl);
-      ENCODE_FINISH(bl);
+      CDentry::encode_remote(item.ino, item.d_type, bl); // remote link
     } else {
       // marker, name, inode, [symlink string]
       bl.append('i');         // inode
