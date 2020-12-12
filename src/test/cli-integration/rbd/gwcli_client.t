@@ -1,9 +1,8 @@
 Login to the target
 ===================
   $ IP=`cat /etc/ceph/iscsi-gateway.cfg |grep 'trusted_ip_list' | awk -F'[, ]' '{print $3}'`
-  > sudo iscsiadm -m discovery -t st -p $IP -l 2&> /dev/null
-  $ sudo ls /dev/disk/by-path/ |grep 'iscsi-iqn.2003-01.com.redhat.iscsi-gw:ceph-gw' |wc -l
-  2
+  > sudo iscsiadm -m discovery -t st -p $IP -l
+  $ sudo ls /dev/disk/by-path/
 
 Make filesystem
 ===============
@@ -12,7 +11,7 @@ Make filesystem
   isize=512
 
   $ device=`sudo multipath -l | grep 'LIO-ORG,TCMU device' | awk '{print $1}'`
-  > blkid /dev/mapper/$device | awk '{print $3}'
+  > sudo blkid /dev/mapper/$device | awk '{print $3}'
   TYPE="xfs"
 
 Write/Read test

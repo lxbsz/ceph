@@ -111,6 +111,9 @@ devices {
         path = "/etc/multipath.conf"
         remote.sudo_write_file(path, conf, append=True)
         remote.run(args=['sudo', 'systemctl', 'start', 'multipathd'])
+        remote.run(args=['sudo', 'systemctl', 'status', 'multipathd'])
+        remote.run(args=['sudo', 'systemctl', 'status', 'iscsid'])
+        remote.run(args=['sudo', 'cat', '/etc/multipath.conf'])
 
     def setup_clients(self):
         for role in self.config['clients']:
