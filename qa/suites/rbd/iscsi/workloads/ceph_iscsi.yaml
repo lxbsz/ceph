@@ -18,6 +18,7 @@ tasks:
     extra_packages:
       - iscsi-initiator-utils
       - device-mapper-multipath
+- ceph:
 - ceph_iscsi:
     gateways: [a_gateway.0, c_gateway.1]
     clients: [b_client.0]
