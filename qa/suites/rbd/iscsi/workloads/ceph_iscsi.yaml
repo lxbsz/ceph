@@ -1,23 +1,4 @@
-use_shaman: True
 tasks:
-- install:
-    packages:
-      rpm:
-      - tcmu-runner
-    project: tcmu-runner
-    sha1: latest
-- install:
-    packages:
-      rpm:
-      - ceph-iscsi
-    shaman:
-      force_noarch: True
-    project: ceph-iscsi
-    sha1: latest
-- install:
-    extra_packages:
-      - iscsi-initiator-utils
-      - device-mapper-multipath
 - ceph_iscsi:
     gateways: [a_gateway.0, c_gateway.1]
     clients: [b_client.0]
