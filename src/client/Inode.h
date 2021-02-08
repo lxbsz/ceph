@@ -283,6 +283,8 @@ struct Inode {
 
   mds_rank_t dir_pin = MDS_RANK_NONE;
 
+  ceph::mutex inode_lock = ceph::make_mutex("Inode::inode_lock");
+
   Inode(Client *c, vinodeno_t vino, file_layout_t *newlayout)
     : client(c), ino(vino.ino), snapid(vino.snapid), delay_cap_item(this),
       dirty_cap_item(this), flushing_cap_item(this), snaprealm_item(this),
