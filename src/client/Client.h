@@ -211,6 +211,10 @@ struct dir_result_t {
   }
 
   InodeRef inode;
+  UserPerm perms;
+
+  // the above members no need to be placed under the Clinet::client_lock
+
   int64_t offset;        // hash order:
 			 //   (0xff << 52) | ((24 bits hash) << 28) |
 			 //   (the nth entry has hash collision);
@@ -224,7 +228,6 @@ struct dir_result_t {
   uint64_t ordered_count;
   unsigned cache_index;
   int start_shared_gen;  // dir shared_gen at start of readdir
-  UserPerm perms;
 
   frag_t buffer_frag;
 
@@ -784,9 +787,11 @@ public:
   void start_tick_thread();
 
   void inc_dentry_nr() {
+    std::scoped_lock cl(client_lock);
     ++dentry_nr;
   }
   void dec_dentry_nr() {
+    std::scoped_lock cl{client_lock};
     --dentry_nr;
   }
   void dlease_hit() {
