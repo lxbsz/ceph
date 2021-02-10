@@ -3163,7 +3163,7 @@ void Client::wait_unsafe_requests()
     if (req->unsafe_item.is_on_list()) {
       cl.unlock();
       std::scoped_lock rl{req->request_lock};
-      wait_on_list(req->waitfor_safe, req);
+      wait_on_list(req->waitfor_safe, req->request_lock);
       cl.lock();
     }
   }
@@ -4085,20 +4085,25 @@ void Client::flush_snaps(Inode *in)
   }
 }
 
-void Client::wait_on_list(list<ceph::condition_variable*>& ls, MetaRequest *req)
+void Client::wait_on_list(list<ceph::condition_variable*>& ls, ceph::mutex &lock)
 {
   ceph::condition_variable cond;
   ls.push_back(&cond);
 
-  if (req) {
-    std::unique_lock rl{req->request_lock, std::adopt_lock};
-    cond.wait(rl);
-    rl.release();
-  } else {
-    std::unique_lock cl{client_lock, std::adopt_lock};
-    cond.wait(cl);
-    cl.release();
-  }
+  std::unique_lock l{lock, std::adopt_lock};
+  cond.wait(l);
+  l.release();
+  ls.remove(&cond);
+}
+
+void Client::wait_on_list(list<ceph::condition_variable*>& ls)
+{
+  ceph::condition_variable cond;
+  ls.push_back(&cond);
+
+  std::unique_lock cl{client_lock, std::adopt_lock};
+  cond.wait(cl);
+  cl.release();
   ls.remove(&cond);
 }
 
@@ -10542,7 +10547,7 @@ int Client::_fsync(Inode *in, bool syncdataonly)
 
     ldout(cct, 15) << "waiting on unsafe requests, last tid " << req->get_tid() <<  dendl;
 
-    wait_on_list(req->waitfor_safe, req.get());
+    wait_on_list(req->waitfor_safe, req->request_lock);
     cl.lock();
     cl.release();
   }
