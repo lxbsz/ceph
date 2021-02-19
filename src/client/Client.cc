@@ -6895,8 +6895,6 @@ int Client::walk(std::string_view path, walk_dentry_result* wdr, const UserPerm&
 
   ldout(cct, 10) << __func__ << ": " << path << dendl;
 
-  std::scoped_lock lock(client_lock);
-
   return path_walk(path, wdr, perms, followsym);
 }
 
@@ -6911,6 +6909,8 @@ int Client::path_walk(const filepath& origpath, InodeRef *end,
 
 int Client::path_walk(const filepath& origpath, walk_dentry_result* result, const UserPerm& perms, bool followsym, int mask)
 {
+  std::scoped_lock cl(client_lock);
+
   filepath path = origpath;
   InodeRef cur;
   std::string alternate_name;
@@ -7010,7 +7010,6 @@ int Client::link(const char *relexisting, const char *relpath, const UserPerm& p
 
   InodeRef in, dir;
 
-  std::scoped_lock lock(client_lock);
   int r = path_walk(existing, &in, perm, true);
   if (r < 0)
     return r;
@@ -7025,6 +7024,8 @@ int Client::link(const char *relexisting, const char *relpath, const UserPerm& p
   r = path_walk(path, &dir, perm, true);
   if (r < 0)
     return r;
+
+  std::scoped_lock lock(client_lock);
   if (cct->_conf->client_permissions) {
     if (S_ISDIR(in->mode)) {
       r = -EPERM;
@@ -7058,10 +7059,11 @@ int Client::unlink(const char *relpath, const UserPerm& perm)
   path.pop_dentry();
   InodeRef dir;
 
-  std::scoped_lock lock(client_lock);
   int r = path_walk(path, &dir, perm);
   if (r < 0)
     return r;
+
+  std::scoped_lock lock(client_lock);
   if (cct->_conf->client_permissions) {
     r = may_delete(dir.get(), name.c_str(), perm);
     if (r < 0)
@@ -7092,14 +7094,14 @@ int Client::rename(const char *relfrom, const char *relto, const UserPerm& perm,
 
   InodeRef fromdir, todir;
 
-  std::scoped_lock lock(client_lock);
   int r = path_walk(from, &fromdir, perm);
   if (r < 0)
-    goto out;
+    return r;
   r = path_walk(to, &todir, perm);
   if (r < 0)
-    goto out;
+    return r;
 
+  std::scoped_lock lock(client_lock);
   if (cct->_conf->client_permissions) {
     int r = may_delete(fromdir.get(), fromname.c_str(), perm);
     if (r < 0)
@@ -7108,9 +7110,8 @@ int Client::rename(const char *relfrom, const char *relto, const UserPerm& perm,
     if (r < 0 && r != -ENOENT)
       return r;
   }
-  r = _rename(fromdir.get(), fromname.c_str(), todir.get(), toname.c_str(), perm, std::move(alternate_name));
-out:
-  return r;
+
+  return _rename(fromdir.get(), fromname.c_str(), todir.get(), toname.c_str(), perm, std::move(alternate_name));
 }
 
 // dirs
@@ -7134,10 +7135,11 @@ int Client::mkdir(const char *relpath, mode_t mode, const UserPerm& perm, std::s
   path.pop_dentry();
   InodeRef dir;
 
-  std::scoped_lock lock(client_lock);
   int r = path_walk(path, &dir, perm);
   if (r < 0)
     return r;
+
+  std::scoped_lock lock(client_lock);
   if (cct->_conf->client_permissions) {
     r = may_create(dir.get(), perm);
     if (r < 0)
@@ -7220,10 +7222,11 @@ int Client::rmdir(const char *relpath, const UserPerm& perms)
   path.pop_dentry();
   InodeRef dir;
 
-  std::scoped_lock lock(client_lock);
   int r = path_walk(path, &dir, perms);
   if (r < 0)
     return r;
+
+  std::scoped_lock lock(client_lock);
   if (cct->_conf->client_permissions) {
     int r = may_delete(dir.get(), name.c_str(), perms);
     if (r < 0)
@@ -7251,10 +7254,11 @@ int Client::mknod(const char *relpath, mode_t mode, const UserPerm& perms, dev_t
   path.pop_dentry();
   InodeRef dir;
 
-  std::scoped_lock lock(client_lock);
   int r = path_walk(path, &dir, perms);
   if (r < 0)
     return r;
+
+  std::scoped_lock lock(client_lock);
   if (cct->_conf->client_permissions) {
     int r = may_create(dir.get(), perms);
     if (r < 0)
@@ -7283,10 +7287,11 @@ int Client::symlink(const char *target, const char *relpath, const UserPerm& per
   path.pop_dentry();
   InodeRef dir;
 
-  std::scoped_lock lock(client_lock);
   int r = path_walk(path, &dir, perms);
   if (r < 0)
     return r;
+
+  std::scoped_lock lock(client_lock);
   if (cct->_conf->client_permissions) {
     int r = may_create(dir.get(), perms);
     if (r < 0)
@@ -7307,11 +7312,11 @@ int Client::readlink(const char *relpath, char *buf, loff_t size, const UserPerm
   filepath path(relpath);
   InodeRef in;
 
-  std::scoped_lock lock(client_lock);
   int r = path_walk(path, &in, perms, false);
   if (r < 0)
     return r;
 
+  std::scoped_lock lock(client_lock);
   return _readlink(in.get(), buf, size);
 }
 
@@ -7619,10 +7624,11 @@ int Client::setattr(const char *relpath, struct stat *attr, int mask,
   filepath path(relpath);
   InodeRef in;
 
-  std::scoped_lock lock(client_lock);
   int r = path_walk(path, &in, perms);
   if (r < 0)
     return r;
+
+  std::scoped_lock cl(client_lock);
   return _setattr(in, attr, mask, perms);
 }
 
@@ -7640,10 +7646,11 @@ int Client::setattrx(const char *relpath, struct ceph_statx *stx, int mask,
   filepath path(relpath);
   InodeRef in;
 
-  std::scoped_lock lock(client_lock);
   int r = path_walk(path, &in, perms, !(flags & AT_SYMLINK_NOFOLLOW));
   if (r < 0)
     return r;
+
+  std::scoped_lock cl(client_lock);
   return _setattrx(in, stx, mask, perms);
 }
 
@@ -7705,10 +7712,11 @@ int Client::stat(const char *relpath, struct stat *stbuf, const UserPerm& perms,
   filepath path(relpath);
   InodeRef in;
 
-  std::scoped_lock lock(client_lock);
   int r = path_walk(path, &in, perms, true, mask);
   if (r < 0)
     return r;
+
+  std::scoped_lock cl(client_lock);
   r = _getattr(in, mask, perms);
   if (r < 0) {
     ldout(cct, 3) << __func__ << " exit on error!" << dendl;
@@ -7758,11 +7766,11 @@ int Client::statx(const char *relpath, struct ceph_statx *stx,
 
   unsigned mask = statx_to_mask(flags, want);
 
-  std::scoped_lock lock(client_lock);
   int r = path_walk(path, &in, perms, !(flags & AT_SYMLINK_NOFOLLOW), mask);
   if (r < 0)
     return r;
 
+  std::scoped_lock cl(client_lock);
   r = _getattr(in, mask, perms);
   if (r < 0) {
     ldout(cct, 3) << __func__ << " exit on error!" << dendl;
@@ -7788,11 +7796,12 @@ int Client::lstat(const char *relpath, struct stat *stbuf,
   filepath path(relpath);
   InodeRef in;
 
-  std::scoped_lock lock(client_lock);
   // don't follow symlinks
   int r = path_walk(path, &in, perms, false, mask);
   if (r < 0)
     return r;
+
+  std::scoped_lock cl(client_lock);
   r = _getattr(in, mask, perms);
   if (r < 0) {
     ldout(cct, 3) << __func__ << " exit on error!" << dendl;
@@ -7974,12 +7983,13 @@ int Client::chmod(const char *relpath, mode_t mode, const UserPerm& perms)
   filepath path(relpath);
   InodeRef in;
 
-  std::scoped_lock lock(client_lock);
   int r = path_walk(path, &in, perms);
   if (r < 0)
     return r;
   struct stat attr;
   attr.st_mode = mode;
+
+  std::scoped_lock cl(client_lock);
   return _setattr(in, &attr, CEPH_SETATTR_MODE, perms);
 }
 
@@ -8020,13 +8030,14 @@ int Client::lchmod(const char *relpath, mode_t mode, const UserPerm& perms)
   filepath path(relpath);
   InodeRef in;
 
-  std::scoped_lock lock(client_lock);
   // don't follow symlinks
   int r = path_walk(path, &in, perms, false);
   if (r < 0)
     return r;
   struct stat attr;
   attr.st_mode = mode;
+
+  std::scoped_lock cl(client_lock);
   return _setattr(in, &attr, CEPH_SETATTR_MODE, perms);
 }
 
@@ -8045,13 +8056,14 @@ int Client::chown(const char *relpath, uid_t new_uid, gid_t new_gid,
   filepath path(relpath);
   InodeRef in;
 
-  std::scoped_lock lock(client_lock);
   int r = path_walk(path, &in, perms);
   if (r < 0)
     return r;
   struct stat attr;
   attr.st_uid = new_uid;
   attr.st_gid = new_gid;
+
+  std::scoped_lock cl(client_lock);
   return _setattr(in, &attr, CEPH_SETATTR_UID|CEPH_SETATTR_GID, perms);
 }
 
@@ -8099,7 +8111,6 @@ int Client::lchown(const char *relpath, uid_t new_uid, gid_t new_gid,
   filepath path(relpath);
   InodeRef in;
 
-  std::scoped_lock lock(client_lock);
   // don't follow symlinks
   int r = path_walk(path, &in, perms, false);
   if (r < 0)
@@ -8110,6 +8121,8 @@ int Client::lchown(const char *relpath, uid_t new_uid, gid_t new_gid,
   int mask = 0;
   if (new_uid != static_cast<uid_t>(-1)) mask |= CEPH_SETATTR_UID;
   if (new_gid != static_cast<gid_t>(-1)) mask |= CEPH_SETATTR_GID;
+
+  std::scoped_lock cl(client_lock);
   return _setattr(in, &attr, mask, perms);
 }
 
@@ -8178,7 +8191,6 @@ int Client::utimes(const char *relpath, struct timeval times[2],
   filepath path(relpath);
   InodeRef in;
 
-  std::scoped_lock lock(client_lock);
   int r = path_walk(path, &in, perms);
   if (r < 0)
     return r;
@@ -8187,6 +8199,8 @@ int Client::utimes(const char *relpath, struct timeval times[2],
   utime_t mtime(times[1]);
 
   attr_set_atime_and_mtime(&attr, atime, mtime);
+
+  std::scoped_lock cl(client_lock);
   return _setattr(in, &attr, CEPH_SETATTR_MTIME|CEPH_SETATTR_ATIME, perms);
 }
 
@@ -8207,15 +8221,15 @@ int Client::lutimes(const char *relpath, struct timeval times[2],
   filepath path(relpath);
   InodeRef in;
 
-  std::scoped_lock lock(client_lock);
   int r = path_walk(path, &in, perms, false);
   if (r < 0)
     return r;
   struct stat attr;
   utime_t atime(times[0]);
   utime_t mtime(times[1]);
-
   attr_set_atime_and_mtime(&attr, atime, mtime);
+
+  std::scoped_lock cl(client_lock);
   return _setattr(in, &attr, CEPH_SETATTR_MTIME|CEPH_SETATTR_ATIME, perms);
 }
 
@@ -8291,10 +8305,11 @@ int Client::opendir(const char *relpath, dir_result_t **dirpp, const UserPerm& p
   filepath path(relpath);
   InodeRef in;
 
-  std::scoped_lock lock(client_lock);
   int r = path_walk(path, &in, perms, true);
   if (r < 0)
     return r;
+
+  std::scoped_lock cl(client_lock);
   if (cct->_conf->client_permissions) {
     int r = may_open(in.get(), O_RDONLY, perms);
     if (r < 0)
@@ -9037,12 +9052,12 @@ int Client::open(const char *relpath, int flags, const UserPerm& perms,
   bool followsym = !((flags & O_NOFOLLOW) || ((flags & O_CREAT) && (flags & O_EXCL)));
   int mask = ceph_caps_for_mode(ceph_flags_to_mode(cflags));
 
-  std::scoped_lock lock(client_lock);
   int r = path_walk(path, &in, perms, followsym, mask);
 
   if (r == 0 && (flags & O_CREAT) && (flags & O_EXCL))
     return -EEXIST;
 
+  std::unique_lock cl(client_lock);
 #if defined(__linux__) && defined(O_PATH)
   if (r == 0 && in->is_symlink() && (flags & O_NOFOLLOW) && !(flags & O_PATH))
 #else
@@ -9055,8 +9070,10 @@ int Client::open(const char *relpath, int flags, const UserPerm& perms,
     string dname = dirpath.last_dentry();
     dirpath.pop_dentry();
     InodeRef dir;
+    cl.unlock();
     r = path_walk(dirpath, &dir, perms, true,
 		  cct->_conf->client_permissions ? CEPH_CAP_AUTH_SHARED : 0);
+    cl.lock();
     if (r < 0)
       goto out;
     if (cct->_conf->client_permissions) {
@@ -10526,11 +10543,11 @@ int Client::chdir(const char *relpath, std::string &new_cwd,
   filepath path(relpath);
   InodeRef in;
 
-  std::scoped_lock lock(client_lock);
   int r = path_walk(path, &in, perms);
   if (r < 0)
     return r;
 
+  std::scoped_lock cl(client_lock);
   if (!(in.get()->is_dir()))
     return -ENOTDIR;
 
@@ -11017,7 +11034,6 @@ int Client::get_snap_info(const char *path, const UserPerm &perms, SnapInfo *sna
     return -ENOTCONN;
   }
 
-  std::scoped_lock lock(client_lock);
   InodeRef in;
   int r = Client::path_walk(path, &in, perms, true);
   if (r < 0) {
@@ -11028,6 +11044,7 @@ int Client::get_snap_info(const char *path, const UserPerm &perms, SnapInfo *sna
     return -EINVAL;
   }
 
+  std::scoped_lock cl(client_lock);
   snap_info->id = in->snapid;
   snap_info->metadata = in->snap_metadata;
   return 0;
@@ -11240,13 +11257,13 @@ int Client::mksnap(const char *relpath, const char *name, const UserPerm& perm,
   if (!mref_reader.is_state_satisfied())
     return -ENOTCONN;
 
-  std::scoped_lock l(client_lock);
-
   filepath path(relpath);
   InodeRef in;
   int r = path_walk(path, &in, perm);
   if (r < 0)
     return r;
+
+  std::scoped_lock cl(client_lock);
   if (cct->_conf->client_permissions) {
     r = may_create(in.get(), perm);
     if (r < 0)
@@ -11262,13 +11279,13 @@ int Client::rmsnap(const char *relpath, const char *name, const UserPerm& perms,
   if (!mref_reader.is_state_satisfied())
     return -ENOTCONN;
 
-  std::scoped_lock l(client_lock);
-
   filepath path(relpath);
   InodeRef in;
   int r = path_walk(path, &in, perms);
   if (r < 0)
     return r;
+
+  std::scoped_lock cl(client_lock);
   Inode *snapdir = open_snapdir(in.get());
   if (cct->_conf->client_permissions) {
     r = may_delete(snapdir, check_perms ? name : NULL, perms);
@@ -11301,13 +11318,13 @@ int Client::get_caps_issued(const char *path, const UserPerm& perms)
   if (!mref_reader.is_state_satisfied())
     return -ENOTCONN;
 
-  std::scoped_lock lock(client_lock);
-
   filepath p(path);
   InodeRef in;
   int r = path_walk(p, &in, perms, true);
   if (r < 0)
     return r;
+
+  std::scoped_lock cl(client_lock);
   return in->caps_issued();
 }
 
@@ -11503,7 +11520,6 @@ int Client::ll_walk(const char* name, Inode **out, struct ceph_statx *stx,
   tout(cct) << __func__ << std::endl;
   tout(cct) << name << std::endl;
 
-  std::scoped_lock lock(client_lock);
   rc = path_walk(fp, &in, perms, !(flags & AT_SYMLINK_NOFOLLOW), mask);
   if (rc < 0) {
     /* zero out mask, just in case... */
@@ -11513,6 +11529,8 @@ int Client::ll_walk(const char* name, Inode **out, struct ceph_statx *stx,
     return rc;
   } else {
     ceph_assert(in);
+
+    std::scoped_lock cl(client_lock);
     fill_statx(in, mask, stx);
     _ll_get(in.get());
     *out = in.get();
@@ -11800,12 +11818,12 @@ int Client::getxattr(const char *path, const char *name, void *value, size_t siz
   if (!mref_reader.is_state_satisfied())
     return -ENOTCONN;
 
-  std::scoped_lock lock(client_lock);
-
   InodeRef in;
   int r = Client::path_walk(path, &in, perms, true, CEPH_STAT_CAP_XATTR);
   if (r < 0)
     return r;
+
+  std::scoped_lock cl(client_lock);
   return _getxattr(in, name, value, size, perms);
 }
 
@@ -11816,12 +11834,12 @@ int Client::lgetxattr(const char *path, const char *name, void *value, size_t si
   if (!mref_reader.is_state_satisfied())
     return -ENOTCONN;
 
-  std::scoped_lock lock(client_lock);
-
   InodeRef in;
   int r = Client::path_walk(path, &in, perms, false, CEPH_STAT_CAP_XATTR);
   if (r < 0)
     return r;
+
+  std::scoped_lock cl(client_lock);
   return _getxattr(in, name, value, size, perms);
 }
 
@@ -11847,12 +11865,12 @@ int Client::listxattr(const char *path, char *list, size_t size,
   if (!mref_reader.is_state_satisfied())
     return -ENOTCONN;
 
-  std::scoped_lock lock(client_lock);
-
   InodeRef in;
   int r = Client::path_walk(path, &in, perms, true, CEPH_STAT_CAP_XATTR);
   if (r < 0)
     return r;
+
+  std::scoped_lock cl(client_lock);
   return Client::_listxattr(in.get(), list, size, perms);
 }
 
@@ -11863,12 +11881,12 @@ int Client::llistxattr(const char *path, char *list, size_t size,
   if (!mref_reader.is_state_satisfied())
     return -ENOTCONN;
 
-  std::scoped_lock lock(client_lock);
-
   InodeRef in;
   int r = Client::path_walk(path, &in, perms, false, CEPH_STAT_CAP_XATTR);
   if (r < 0)
     return r;
+
+  std::scoped_lock cl(client_lock);
   return Client::_listxattr(in.get(), list, size, perms);
 }
 
@@ -11893,8 +11911,6 @@ int Client::removexattr(const char *path, const char *name,
   if (!mref_reader.is_state_satisfied())
     return -ENOTCONN;
 
-  std::scoped_lock lock(client_lock);
-
   InodeRef in;
   int r = Client::path_walk(path, &in, perms, true);
   if (r < 0)
@@ -11909,12 +11925,12 @@ int Client::lremovexattr(const char *path, const char *name,
   if (!mref_reader.is_state_satisfied())
     return -ENOTCONN;
 
-  std::scoped_lock lock(client_lock);
-
   InodeRef in;
   int r = Client::path_walk(path, &in, perms, false);
   if (r < 0)
     return r;
+
+  std::scoped_lock lock(client_lock);
   return _removexattr(in, name, perms);
 }
 
@@ -11928,7 +11944,6 @@ int Client::fremovexattr(int fd, const char *name, const UserPerm& perms)
   if (!f)
     return -EBADF;
 
-  std::scoped_lock cl(client_lock);
   return _removexattr(f->inode, name, perms);
 }
 
@@ -11942,10 +11957,11 @@ int Client::setxattr(const char *path, const char *name, const void *value,
   _setxattr_maybe_wait_for_osdmap(name, value, size);
 
   InodeRef in;
-  std::scoped_lock cl(client_lock);
   int r = Client::path_walk(path, &in, perms, true);
   if (r < 0)
     return r;
+
+  std::scoped_lock cl(client_lock);
   return _setxattr(in, name, value, size, flags, perms);
 }
 
@@ -11960,10 +11976,11 @@ int Client::lsetxattr(const char *path, const char *name, const void *value,
 
   InodeRef in;
 
-  std::scoped_lock cl(client_lock);
   int r = Client::path_walk(path, &in, perms, false);
   if (r < 0)
     return r;
+
+  std::scoped_lock cl(client_lock);
   return _setxattr(in, name, value, size, flags, perms);
 }
 
@@ -12365,6 +12382,7 @@ int Client::_removexattr(Inode *in, const char *name, const UserPerm& perms)
       strncmp(name, "ceph.", 5))
     return -EOPNOTSUPP;
 
+  std::scoped_lock cl(client_lock);
   const VXattr *vxattr = _match_vxattr(in, name);
   if (vxattr && vxattr->readonly)
     return -EOPNOTSUPP;
@@ -12385,10 +12403,13 @@ int Client::_removexattr(Inode *in, const char *name, const UserPerm& perms)
 
 int Client::_removexattr(InodeRef &in, const char *name, const UserPerm& perms)
 {
-  if (cct->_conf->client_permissions) {
-    int r = xattr_permission(in.get(), name, MAY_WRITE, perms);
-    if (r < 0)
-      return r;
+  {
+    std::scoped_lock cl(client_lock);
+    if (cct->_conf->client_permissions) {
+      int r = xattr_permission(in.get(), name, MAY_WRITE, perms);
+      if (r < 0)
+        return r;
+    }
   }
   return _removexattr(in.get(), name, perms);
 }
@@ -14473,14 +14494,13 @@ int Client::describe_layout(const char *relpath, file_layout_t *lp,
   if (!mref_reader.is_state_satisfied())
     return -ENOTCONN;
 
-  std::scoped_lock lock(client_lock);
-
   filepath path(relpath);
   InodeRef in;
   int r = path_walk(path, &in, perms);
   if (r < 0)
     return r;
 
+  std::scoped_lock cl(client_lock);
   *lp = in->layout;
 
   ldout(cct, 3) << __func__ << "(" << relpath << ") = 0" << dendl;
