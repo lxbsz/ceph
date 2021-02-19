@@ -21,6 +21,8 @@ struct Fh : public RefCountedObject {
   uint64_t  gen;
   UserPerm  actor_perms; // perms I opened the file with
 
+  ceph::mutex fh_lock = ceph::make_mutex("Fh::fh_lock");
+
   // the members above once ininitalized in the constructor
   // they won't change, and putting them under the client_lock
   // makes no sense.
