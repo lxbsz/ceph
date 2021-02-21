@@ -1907,7 +1907,11 @@ int Client::make_request(MetaRequestRef &request,
 	}
       } else {
 	ldout(cct, 10) << " target mds." << mds << " not active, waiting for new mdsmap" << dendl;
+	rl.unlock();
 	wait_on_list(waiting_for_mdsmap);
+	cl.unlock();
+	rl.lock();
+	cl.lock();
       }
       cl.unlock();
       continue;
@@ -6790,6 +6794,7 @@ void Client::_unmount(bool abort)
 
   delay_put_requests();
   delay_put_inodes();
+  delay_put_fh();
 
   std::unique_lock cl{client_lock};
 
@@ -6838,8 +6843,6 @@ void Client::_unmount(bool abort)
     _release_fh(fh);
   }
 
-  delay_put_fh();
-
   while (!opened_dirs.empty()) {
     dir_result_t *dirp = *opened_dirs.begin();
     ldout(cct, 0) << " destroyed lost open dir " << dirp << " on " << *dirp->inode << dendl;
@@ -6867,7 +6870,9 @@ void Client::_unmount(bool abort)
       if (abort || blocklisted) {
         objectcacher->purge_set(&in->oset);
       } else if (!in->caps.empty()) {
+        cl.unlock();
 	_release(in);
+        cl.lock();
 	_flush(in, new C_Client_FlushComplete(this, in));
       }
     }
@@ -8028,6 +8033,7 @@ force_request:
   {
     std::scoped_lock cl(client_lock);
     res = make_request(req, perms, inp);
+    ldout(cct, 10) << "_setattr result=" << res << dendl;
   }
   il.lock();
   il.release();
