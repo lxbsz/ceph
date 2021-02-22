@@ -10624,8 +10624,7 @@ int Client::_do_filelock(Inode *in, Fh *fh, int lock_type, int op, int sleep,
 	  in->flock_locks.reset(new ceph_lock_state_t(cct, CEPH_LOCK_FLOCK));
 	lock_state = in->flock_locks.get();
       } else {
-	ceph_abort();
-	return -EINVAL;
+        return -EINVAL;
       }
       _update_lock_state(fl, owner, lock_state);
 
@@ -10641,8 +10640,9 @@ int Client::_do_filelock(Inode *in, Fh *fh, int lock_type, int op, int sleep,
 	}
 	_update_lock_state(fl, owner, lock_state);
       }
-    } else
-      ceph_abort();
+    } else {
+      return -EINVAL;
+    }
   }
   return ret;
 }
