@@ -223,6 +223,8 @@ struct Inode {
   map<int,int> open_by_mode;
   map<int,int> cap_refs;
 
+  ceph::mutex inode_lock;
+
   ObjectCacher::ObjectSet oset; // ORDER DEPENDENCY: ino
 
   uint64_t reported_size = 0;
@@ -283,12 +285,10 @@ struct Inode {
 
   mds_rank_t dir_pin = MDS_RANK_NONE;
 
-  ceph::mutex inode_lock = ceph::make_mutex("Inode::inode_lock");
-
-  Inode(Client *c, vinodeno_t vino, file_layout_t *newlayout)
+  Inode(Client *c, vinodeno_t vino, file_layout_t *newlayout, string lock_name)
     : client(c), ino(vino.ino), snapid(vino.snapid), delay_cap_item(this),
       dirty_cap_item(this), flushing_cap_item(this), snaprealm_item(this),
-      oset((void *)this, newlayout->pool_id, this->ino)
+      inode_lock(lock_name), oset((void *)this, newlayout->pool_id, this->ino, inode_lock)
   {
     memset(&dir_layout, 0, sizeof(dir_layout));
   }
