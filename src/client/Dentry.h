@@ -37,9 +37,10 @@ public:
     ceph_assert(ref > 0);
     if (--ref == 1)
       lru_unpin();
-    //cout << "dentry.put on " << this << " " << name << " now " << ref << std::endl;
-    if (ref == 0)
+    if (ref == 0) {
+      cout << pthread_self() << " " << "dentry.put on " << this << " " << name << " now " << ref << std::endl;
       delete this;
+    }
   }
   void link(InodeRef in) {
     ceph_assert(ceph_mutex_is_locked_by_me(dir->parent_inode->inode_lock));

@@ -690,20 +690,26 @@ void Client::trim_cache(bool trim_kernel_dcache)
   uint64_t max = cct->_conf->client_cache_size;
   ldout(cct, 20) << "trim_cache size " << lru.lru_get_size() << " max " << max << dendl;
   unsigned last = 0;
+  std::set<Dentry *> to_trim;
   while (lru.lru_get_size() != last) {
     last = lru.lru_get_size();
 
     if (!is_unmounting() && lru.lru_get_size() <= max)  break;
 
     // trim!
-    Dentry *dn = static_cast<Dentry*>(lru.lru_get_next_expire());
+    Dentry *dn = static_cast<Dentry*>(lru.lru_expire());
     if (!dn)
       break;  // done
 
-    client_lock.unlock();
-    trim_dentry(dn);
-    client_lock.lock();
+    to_trim.insert(dn);
   }
+
+  client_lock.unlock();
+  for (const auto &dn : to_trim) {
+    trim_dentry(dn);
+  }
+  to_trim.clear();
+  client_lock.lock();
 
   if (trim_kernel_dcache && lru.lru_get_size() > max)
     _invalidate_kernel_dcache();
@@ -757,8 +763,8 @@ void Client::trim_cache_for_reconnect(MetaSession *s)
     client_lock.lock();
   }
 
-  for(list<Dentry*>::iterator p = skipped.begin(); p != skipped.end(); ++p)
-    lru.lru_insert_mid(*p);
+  for(const auto &dn : skipped)
+    lru.lru_insert_mid(dn);
 
   ldout(cct, 20) << __func__ << " mds." << mds
 		 << " trimmed " << trimmed << " dentries" << dendl;
@@ -769,6 +775,7 @@ void Client::trim_cache_for_reconnect(MetaSession *s)
 
 void Client::trim_dentry(Dentry *dn)
 {
+  std::cout << pthread_self() << " " << __func__ << ":" << __LINE__ << " ============= > dn : " << dn << "\n";
   Inode *diri = dn->dir->parent_inode;
   std::scoped_lock il{diri->inode_lock};
 
@@ -1122,13 +1129,39 @@ Dentry *Client::insert_dentry_inode(Dir *dir, const string& dname, LeaseStat *dl
 	{
           std::scoped_lock oil{old_diri->inode_lock};
           clear_dir_complete_and_ordered(old_diri, false);
-          unlink(old_dentry, false, false);  // drop dentry and close dir
+
+          bool need_unlink = false;
+          {
+            std::scoped_lock cl{client_lock};
+            if (lru.is_on_lru(old_dentry)) {
+              lru.lru_remove(old_dentry);
+              need_unlink = true;
+            }
+          }
+          if (need_unlink) {
+            unlink(old_dentry, false, false);  // drop dentry and close dir
+          } else {
+            // try to close the dir if other thread has
+            // dropped the dentry, it may not close the
+            // dir, do it here.
+            if (old_dentry->dir->is_empty())
+              close_dir(old_dentry->dir);
+          }
 	}
         pil.lock();
       } else {
 	Inode *old_diri = old_dentry->dir->parent_inode;
 	clear_dir_complete_and_ordered(old_diri, false);
-        unlink(old_dentry, true, false);  // drop dentry, keep dir open
+        bool need_unlink = false;
+        {
+          std::scoped_lock cl{client_lock};
+          if (lru.is_on_lru(old_dentry)) {
+            lru.lru_remove(old_dentry);
+            need_unlink = true;
+          }
+        }
+        if (need_unlink)
+          unlink(old_dentry, true, false);  // drop dentry, keep dir open
       }
     }
     Inode *diri = dir->parent_inode;
@@ -3552,6 +3585,7 @@ Dentry* Client::link(Dir *dir, const string& name, Inode *in, Dentry *dn)
 
 void Client::unlink(Dentry *dn, bool keepdir, bool keepdentry)
 {
+  std::cout << pthread_self() << " " << __func__ << ":" << __LINE__ << " ============= > dn : " << dn << "\n";
   ceph_assert(ceph_mutex_is_locked_by_me(dn->dir->parent_inode->inode_lock));
 
   InodeRef in(dn->inode);
@@ -3568,16 +3602,25 @@ void Client::unlink(Dentry *dn, bool keepdir, bool keepdentry)
   if (keepdentry) {
     dn->lease_mds = -1;
   } else {
+    // unlink from dir
     ldout(cct, 15) << "unlink  removing '" << dn->name << "' dn " << dn << dendl;
 
-    // unlink from dir
+    {
+      std::scoped_lock cl(client_lock);
+      ceph_assert(!lru.is_on_lru(dn));
+    }
+
+    // save the dir before dn is detached
     Dir *dir = dn->dir;
     dn->detach();
 
-    // delete den
-    std::scoped_lock cl(client_lock);
-    lru.lru_remove(dn);
-    dn->put();
+    {
+      // this need the client_lock because
+      // it will modify the client->lru
+      std::scoped_lock cl(client_lock);
+      // delete den
+      dn->put();
+    }
 
     if (dir->is_empty() && !keepdir)
       close_dir(dir);
@@ -4830,8 +4873,18 @@ void Client::_trim_negative_child_dentries(InodeRef& in)
       Dentry *dn = p->second;
       ++p;
       ceph_assert(!dn->inode);
-      if (dn->lru_is_expireable())
-	unlink(dn, true, false);  // keep dir, drop dentry
+      if (dn->lru_is_expireable()) {
+	bool need_unlink = false;
+	{
+          std::scoped_lock cl{client_lock};
+          if (lru.is_on_lru(dn)) {
+            lru.lru_remove(dn);
+	    need_unlink = true;
+	  }
+	}
+	if (need_unlink)
+	  unlink(dn, true, false);  // keep dir, drop dentry
+      }
     }
     if (dir->dentries.empty()) {
       close_dir(dir);
@@ -4881,6 +4934,7 @@ void Client::_schedule_ino_release_callback(Inode *in)
 {
   ceph_assert(ceph_mutex_is_locked_by_me(in->inode_lock));
 
+  std::scoped_lock cl{client_lock};
   if (ino_release_cb)
     // we queue the invalidate, which calls the callback and decrements the ref
     async_ino_releasor.queue(new C_Client_CacheRelease(this, in));
@@ -4935,7 +4989,14 @@ void Client::trim_caps(MetaSession *s, uint64_t max)
 	    _schedule_invalidate_dentry_callback(dn, true);
 	  }
           ldout(cct, 20) << " queueing dentry for trimming: " << dn->name << dendl;
-          to_trim.insert(dn);
+
+	  // remove it from lru since we are dropping
+	  // it later in trim_dentry()
+          std::scoped_lock cl{client_lock};
+          if (lru.is_on_lru(dn)) {
+            lru.lru_remove(dn);
+            to_trim.insert(dn);
+	  }
         } else {
           ldout(cct, 20) << "  not expirable: " << dn->name << dendl;
 	  all = false;
@@ -5867,6 +5928,7 @@ void Client::_schedule_invalidate_dentry_callback(Dentry *dn, bool del)
 {
   ceph_assert(ceph_mutex_is_locked_by_me(dn->dir->parent_inode->inode_lock));
 
+  std::scoped_lock cl{client_lock};
   if (dentry_invalidate_cb && dn->inode->ll_ref > 0)
     async_dentry_invalidator.queue(new C_Client_DentryInvalidate(this, dn, del));
 }
@@ -5895,8 +5957,18 @@ void Client::_try_to_trim_inode(Inode *in, bool sched_inval)
 	}
       }
 
-      if (dn->lru_is_expireable())
-	unlink(dn, true, false);  // keep dir, drop dentry
+      if (dn->lru_is_expireable()) {
+        bool need_trim = false;
+        {
+          std::scoped_lock cl{client_lock};
+          if (lru.is_on_lru(dn)) {
+            lru.lru_remove(dn);
+            need_trim = true;
+          }
+        }
+        if (need_trim)
+          unlink(dn, true, false);  // keep dir, drop dentry
+      }
     }
     if (in->dir->dentries.empty()) {
       close_dir(in->dir);
@@ -8532,7 +8604,7 @@ void Client::fill_statx(Inode *in, unsigned int mask, struct ceph_statx *stx)
 void Client::touch_dn(Dentry *dn)
 {
   std::scoped_lock cl(client_lock);
-  lru.lru_touch(dn);
+  lru.lru_touch(dn, false);
 }
 
 int Client::chmod(const char *relpath, mode_t mode, const UserPerm& perms)
@@ -14337,6 +14409,12 @@ int Client::_rename(Inode *fromdir, const char *fromname, Inode *todir, const ch
     res = get_or_create(fromdir, fromname, &oldde);
     if (res < 0)
       return res;
+    if (op == CEPH_MDS_OP_RENAME)
+      req->set_old_dentry(oldde);
+    else
+      // renamesnap reply contains no tracedn, so we need to invalidate
+      // dentry manually
+      unlink(oldde, true, true);
   }
   Dentry *de;
   {
@@ -14344,14 +14422,18 @@ int Client::_rename(Inode *fromdir, const char *fromname, Inode *todir, const ch
     res = get_or_create(todir, toname, &de);
     if (res < 0)
       return res;
+    if (op == CEPH_MDS_OP_RENAME)
+      req->set_dentry(de);
+    else
+      // renamesnap reply contains no tracedn, so we need to invalidate
+      // dentry manually
+      unlink(de, true, true);
   }
 
   if (op == CEPH_MDS_OP_RENAME) {
-    req->set_old_dentry(oldde);
     req->old_dentry_drop = CEPH_CAP_FILE_SHARED;
     req->old_dentry_unless = CEPH_CAP_FILE_EXCL;
 
-    req->set_dentry(de);
     req->dentry_drop = CEPH_CAP_FILE_SHARED;
     req->dentry_unless = CEPH_CAP_FILE_EXCL;
 
@@ -14390,11 +14472,6 @@ int Client::_rename(Inode *fromdir, const char *fromname, Inode *todir, const ch
 
     req->set_inode(todir);
   } else {
-    // renamesnap reply contains no tracedn, so we need to invalidate
-    // dentry manually
-    unlink(oldde, true, true);
-    unlink(de, true, true);
-
     req->set_inode(todir);
   }
 
