@@ -15342,6 +15342,16 @@ void Client::handle_conf_change(const ConfigProxy& conf,
   }
 }
 
+void intrusive_ptr_add_ref(Dentry *dn)
+{
+  dn->get();
+}
+
+void intrusive_ptr_release(Dentry *dn)
+{
+  dn->put();
+}
+
 void intrusive_ptr_add_ref(Inode *in)
 {
   in->get();

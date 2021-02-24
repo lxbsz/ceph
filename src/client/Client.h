@@ -37,6 +37,7 @@
 #include "msg/Messenger.h"
 #include "osdc/ObjectCacher.h"
 #include "MetaRequestRef.h"
+#include "DentryRef.h"
 
 #include "RWRef.h"
 #include "InodeRef.h"
