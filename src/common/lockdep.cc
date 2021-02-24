@@ -18,7 +18,7 @@
 
 /******* Constants **********/
 #define lockdep_dout(v) lsubdout(g_lockdep_ceph_ctx, lockdep, v)
-#define MAX_LOCKS  4096   // increase me as needed
+#define MAX_LOCKS  8096   // 2 ^ 13, increase me as needed
 #define BACKTRACE_SKIP 2
 
 /******* Globals **********/

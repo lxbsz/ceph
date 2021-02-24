@@ -414,7 +414,7 @@ inodeno_t Client::get_root_ino()
 
 Inode *Client::get_root()
 {
-  std::scoped_lock l(client_lock);
+  std::scoped_lock il(root->inode_lock);
   root->ll_get();
   return root;
 }
@@ -2072,8 +2072,10 @@ void Client::_put_request(MetaRequest *request)
 	(op == CEPH_MDS_OP_RMDIR ||
 	 op == CEPH_MDS_OP_RENAME ||
 	 op == CEPH_MDS_OP_RMSNAP)) {
+      client_lock.unlock();
       std::scoped_lock il{other_in->inode_lock};
       _try_to_trim_inode(other_in.get(), false);
+      client_lock.lock();
     }
   }
 
@@ -5027,7 +5029,7 @@ void Client::adjust_session_flushing_caps(Inode *in, MetaSession *old_s,  MetaSe
  */
 void Client::flush_caps_sync()
 {
-  std::unique_lock cl{client_lock, std::adopt_lock};
+  ceph_assert(ceph_mutex_is_locked_by_me(client_lock));
 
   ldout(cct, 10) << __func__ << dendl;
   xlist<Inode*>::iterator p = delayed_list.begin();
@@ -5040,10 +5042,12 @@ void Client::flush_caps_sync()
     if (p.end() && dirty_list.empty())
       flags |= CHECK_CAPS_SYNCHRONOUS;
 
-    cl.unlock();
-    std::scoped_lock il(in->inode_lock);
-    check_caps(in.get(), flags);
-    cl.lock();
+    client_lock.unlock();
+    {
+      std::scoped_lock il(in->inode_lock);
+      check_caps(in.get(), flags);
+    }
+    client_lock.lock();
   }
 
   // other caps, too
@@ -5056,13 +5060,13 @@ void Client::flush_caps_sync()
     if (p.end())
       flags |= CHECK_CAPS_SYNCHRONOUS;
 
-    cl.unlock();
-    std::scoped_lock il(in->inode_lock);
-    check_caps(in.get(), flags);
-    cl.lock();
+    client_lock.unlock();
+    {
+      std::scoped_lock il(in->inode_lock);
+      check_caps(in.get(), flags);
+    }
+    client_lock.lock();
   }
-
-  cl.release();
 }
 
 void Client::wait_sync_caps(Inode *in, ceph_tid_t want)
@@ -5884,9 +5888,11 @@ void Client::_try_to_trim_inode(Inode *in, bool sched_inval)
        * invalidating a directory dentry effectively invalidate
        * whole subtree */
       {
-        std::scoped_lock dil(dn->inode->inode_lock);
-        if (in->snapid != CEPH_NOSNAP && dn->inode && dn->inode->is_dir())
-	  _try_to_trim_inode(dn->inode.get(), false);
+        if (in->snapid != CEPH_NOSNAP && dn->inode) {
+          std::scoped_lock dil(dn->inode->inode_lock);
+	  if (dn->inode->is_dir())
+	    _try_to_trim_inode(dn->inode.get(), false);
+	}
       }
 
       if (dn->lru_is_expireable())
@@ -9122,7 +9128,6 @@ struct dentry_off_lt {
 int Client::_readdir_cache_cb(dir_result_t *dirp, add_dirent_cb_t cb, void *p,
 			      int caps, bool getref)
 {
-  ceph_assert(ceph_mutex_is_not_locked(client_lock));
   ceph_assert(ceph_mutex_is_locked_by_me(dirp->inode->inode_lock));
 
   std::unique_lock cl(client_lock);
@@ -9702,6 +9707,7 @@ int Client::open(const char *relpath, int flags, const UserPerm& perms,
   if (r < 0)
     goto out;
 
+  ceph_assert(!ceph_mutex_is_locked_by_me(in->inode_lock));
   if (!created) {
     // posix says we can only check permissions of existing files
     if (cct->_conf->client_permissions) {
@@ -9711,8 +9717,10 @@ int Client::open(const char *relpath, int flags, const UserPerm& perms,
     }
   }
 
+  ceph_assert(!ceph_mutex_is_locked_by_me(in->inode_lock));
   if (!fh)
     r = _open(in.get(), flags, mode, &fh, perms);
+  ceph_assert(!ceph_mutex_is_locked_by_me(in->inode_lock));
   if (r >= 0) {
     // allocate a integer file descriptor
     ceph_assert(fh);
@@ -9722,6 +9730,7 @@ int Client::open(const char *relpath, int flags, const UserPerm& perms,
     fd_map[r] = fh;
   }
   
+  ceph_assert(!ceph_mutex_is_locked_by_me(in->inode_lock));
  out:
   tout(cct) << r << std::endl;
   ldout(cct, 3) << "open exit(" << path << ", " << cflags << ") = " << r << dendl;
@@ -11637,13 +11646,16 @@ void Client::_release_filelocks(Fh *fh)
   if (!fh->fcntl_locks && !fh->flock_locks)
     return;
 
-  Inode *in = fh->inode.get();
+  InodeRef in = fh->inode.get();
   ldout(cct, 10) << __func__ << " " << fh << " ino " << in->ino << dendl;
 
   list<ceph_filelock> activated_locks;
 
   list<pair<int, ceph_filelock> > to_release;
 
+  client_lock.unlock();
+  std::unique_lock il{in->inode_lock};
+  client_lock.lock();
   if (fh->fcntl_locks) {
     auto &lock_state = fh->fcntl_locks;
     for(auto p = lock_state->held_locks.begin(); p != lock_state->held_locks.end(); ) {
@@ -11680,15 +11692,19 @@ void Client::_release_filelocks(Fh *fh)
   fl.l_whence = SEEK_SET;
   fl.l_type = F_UNLCK;
 
+  il.unlock();
   for (list<pair<int, ceph_filelock> >::iterator p = to_release.begin();
        p != to_release.end();
        ++p) {
     fl.l_start = p->second.start;
     fl.l_len = p->second.length;
     fl.l_pid = p->second.pid;
-    _do_filelock(in, fh, p->first, CEPH_MDS_OP_SETFILELOCK, 0, &fl,
+    _do_filelock(in.get(), fh, p->first, CEPH_MDS_OP_SETFILELOCK, 0, &fl,
 		 p->second.owner, true);
   }
+  client_lock.unlock();
+  il.lock();
+  client_lock.lock();
 }
 
 void Client::_update_lock_state(struct flock *fl, uint64_t owner,
@@ -12162,9 +12178,11 @@ int Client::ll_lookup(Inode *parent, const char *name, struct stat *attr,
     ceph_assert(in);
 
     pil.unlock();
-    std::scoped_lock il(in->inode_lock);
-    fill_stat(in, attr);
-    _ll_get(in.get());
+    {
+      std::scoped_lock il(in->inode_lock);
+      fill_stat(in, attr);
+      _ll_get(in.get());
+    }
     pil.lock();
   }
 
@@ -12273,9 +12291,11 @@ int Client::ll_lookupx(Inode *parent, const char *name, Inode **out,
     ceph_assert(in);
 
     pil.unlock();
-    std::scoped_lock il(in->inode_lock);
-    fill_statx(in, mask, stx);
-    _ll_get(in.get());
+    {
+      std::scoped_lock il(in->inode_lock);
+      fill_statx(in, mask, stx);
+      _ll_get(in.get());
+    }
     pil.lock();
   }
 
@@ -13655,9 +13675,11 @@ int Client::ll_mknod(Inode *parent, const char *name, mode_t mode,
   int r = _mknod(parent, name, mode, rdev, perms, &in);
   if (r == 0) {
     pil.unlock();
-    std::scoped_lock il(in->inode_lock);
-    fill_stat(in, attr);
-    _ll_get(in.get());
+    {
+      std::scoped_lock il(in->inode_lock);
+      fill_stat(in, attr);
+      _ll_get(in.get());
+    }
     pil.lock();
   }
   tout(cct) << attr->st_ino << std::endl;
@@ -13912,9 +13934,11 @@ int Client::ll_mkdir(Inode *parent, const char *name, mode_t mode,
   int r = _mkdir(parent, name, mode, perm, &in);
   if (r == 0) {
     pil.unlock();
-    std::scoped_lock il(in->inode_lock);
-    fill_stat(in, attr);
-    _ll_get(in.get());
+    {
+      std::scoped_lock il(in->inode_lock);
+      fill_stat(in, attr);
+      _ll_get(in.get());
+    }
     pil.lock();
   }
   tout(cct) << attr->st_ino << std::endl;
@@ -13951,9 +13975,11 @@ int Client::ll_mkdirx(Inode *parent, const char *name, mode_t mode, Inode **out,
   int r = _mkdir(parent, name, mode, perms, &in);
   if (r == 0) {
     pil.unlock();
-    std::scoped_lock il(in->inode_lock);
-    fill_statx(in, statx_to_mask(flags, want), stx);
-    _ll_get(in.get());
+    {
+      std::scoped_lock il(in->inode_lock);
+      fill_statx(in, statx_to_mask(flags, want), stx);
+      _ll_get(in.get());
+    }
     pil.lock();
   } else {
     stx->stx_ino = 0;
@@ -14043,9 +14069,11 @@ int Client::ll_symlink(Inode *parent, const char *name, const char *value,
   int r = _symlink(parent, name, value, perms, "", &in);
   if (r == 0) {
     pil.unlock();
-    std::scoped_lock il(in->inode_lock);
-    fill_stat(in, attr);
-    _ll_get(in.get());
+    {
+      std::scoped_lock il(in->inode_lock);
+      fill_stat(in, attr);
+      _ll_get(in.get());
+    }
     pil.lock();
   }
   tout(cct) << attr->st_ino << std::endl;
@@ -14083,9 +14111,11 @@ int Client::ll_symlinkx(Inode *parent, const char *name, const char *value,
   int r = _symlink(parent, name, value, perms, "", &in);
   if (r == 0) {
     dil.unlock();
-    std::scoped_lock il(in->inode_lock);
-    fill_statx(in, statx_to_mask(flags, want), stx);
-    _ll_get(in.get());
+    {
+      std::scoped_lock il(in->inode_lock);
+      fill_statx(in, statx_to_mask(flags, want), stx);
+      _ll_get(in.get());
+    }
     dil.lock();
   }
   tout(cct) << stx->stx_ino << std::endl;
