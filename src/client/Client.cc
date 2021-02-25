@@ -714,17 +714,32 @@ void Client::trim_cache(bool trim_kernel_dcache)
   if (trim_kernel_dcache && lru.lru_get_size() > max)
     _invalidate_kernel_dcache();
 
+  std::cout << pthread_self() << " " << __func__ << ":" << __LINE__ << "\n";
   // hose root?
   if (lru.lru_get_size() == 0 && root && root->get_num_ref() == 0 && inode_map.size() == 1 + root_parents.size()) {
     ldout(cct, 15) << "trim_cache trimmed root " << root << dendl;
+  std::cout << pthread_self() << " " << __func__ << ":" << __LINE__ << "\n";
+//    ceph_assert(ceph_mutex_is_locked_by_me(root->inode_lock));
+    ceph_assert(ceph_mutex_is_locked(root->inode_lock));
+    client_lock.unlock();
+    root->inode_lock.lock();
+    root->inode_lock.unlock();
+    client_lock.lock();
     delete root;
+  std::cout << pthread_self() << " " << __func__ << ":" << __LINE__ << "\n";
     root = 0;
+//  std::cout << pthread_self() << " " << __func__ << ":" << __LINE__ << "\n";
     root_ancestor = 0;
+//  std::cout << pthread_self() << " " << __func__ << ":" << __LINE__ << "\n";
     while (!root_parents.empty())
       root_parents.erase(root_parents.begin());
+//  std::cout << pthread_self() << " " << __func__ << ":" << __LINE__ << "\n";
     inode_map.clear();
+//  std::cout << pthread_self() << " " << __func__ << ":" << __LINE__ << "\n";
     _reset_faked_inos();
+//  std::cout << pthread_self() << " " << __func__ << ":" << __LINE__ << "\n";
   }
+  std::cout << pthread_self() << " " << __func__ << ":" << __LINE__ << "\n";
 }
 
 void Client::trim_cache_for_reconnect(MetaSession *s)
@@ -775,7 +790,7 @@ void Client::trim_cache_for_reconnect(MetaSession *s)
 
 void Client::trim_dentry(Dentry *dn)
 {
-  std::cout << pthread_self() << " " << __func__ << ":" << __LINE__ << " ============= > dn : " << dn << "\n";
+//  std::cout << pthread_self() << " " << __func__ << ":" << __LINE__ << " ============= > dn : " << dn << "\n";
   Inode *diri = dn->dir->parent_inode;
   std::scoped_lock il{diri->inode_lock};
 
@@ -1752,6 +1767,8 @@ out:
 
 void Client::connect_mds_targets(mds_rank_t mds)
 {
+  ceph_assert(ceph_mutex_is_locked_by_me(client_lock));
+
   ldout(cct, 10) << __func__ << " for mds." << mds << dendl;
   ceph_assert(mds_sessions.count(mds));
   const MDSMap::mds_info_t& info = mdsmap->get_mds_info(mds);
@@ -2372,6 +2389,8 @@ void Client::update_metadata(std::string const &k, std::string const &v)
 
 MetaSessionRef Client::_open_mds_session(mds_rank_t mds)
 {
+  ceph_assert(ceph_mutex_is_locked_by_me(client_lock));
+
   ldout(cct, 10) << __func__ << " mds." << mds << dendl;
   auto addrs = mdsmap->get_addrs(mds);
   auto em = mds_sessions.emplace(std::piecewise_construct,
@@ -2390,6 +2409,8 @@ MetaSessionRef Client::_open_mds_session(mds_rank_t mds)
 
 void Client::_close_mds_session(MetaSession *s)
 {
+  ceph_assert(ceph_mutex_is_locked_by_me(client_lock));
+
   ldout(cct, 2) << __func__ << " mds." << s->mds_num << " seq " << s->seq << dendl;
   s->state = MetaSession::STATE_CLOSING;
   s->con->send_message2(make_message<MClientSession>(CEPH_SESSION_REQUEST_CLOSE, s->seq));
@@ -2416,6 +2437,7 @@ void Client::_closed_mds_session(MetaSession *s, int err, bool rejected)
 
 void Client::handle_client_session(const MConstRef<MClientSession>& m)
 {
+//  std::cout << pthread_self() << " " << __func__ << ":" << __LINE__ << "\n";
   mds_rank_t from = mds_rank_t(m->get_source().num());
   ldout(cct, 10) << __func__ << " " << *m << " from mds." << from << dendl;
 
@@ -2425,9 +2447,11 @@ void Client::handle_client_session(const MConstRef<MClientSession>& m)
     ldout(cct, 10) << " discarding session message from sessionless mds " << m->get_source_inst() << dendl;
     return;
   }
+//  std::cout << pthread_self() << " " << __func__ << ":" << __LINE__ << "\n";
 
   switch (m->get_op()) {
   case CEPH_SESSION_OPEN:
+  std::cout << pthread_self() << " " << __func__ << ":" << __LINE__ << "\n";
     {
       feature_bitset_t missing_features(CEPHFS_FEATURES_CLIENT_REQUIRED);
       missing_features -= m->supported_features;
@@ -2451,10 +2475,12 @@ void Client::handle_client_session(const MConstRef<MClientSession>& m)
     }
 
   case CEPH_SESSION_CLOSE:
+  std::cout << pthread_self() << " " << __func__ << ":" << __LINE__ << "\n";
     _closed_mds_session(session.get());
     break;
 
   case CEPH_SESSION_RENEWCAPS:
+  std::cout << pthread_self() << " " << __func__ << ":" << __LINE__ << "\n";
     if (session->cap_renew_seq == m->get_seq()) {
       bool was_stale = ceph_clock_now() >= session->cap_ttl;
       session->cap_ttl =
@@ -2465,6 +2491,7 @@ void Client::handle_client_session(const MConstRef<MClientSession>& m)
     break;
 
   case CEPH_SESSION_STALE:
+  std::cout << pthread_self() << " " << __func__ << ":" << __LINE__ << "\n";
     // invalidate session caps/leases
     session->cap_gen++;
     session->cap_ttl = ceph_clock_now();
@@ -2473,6 +2500,7 @@ void Client::handle_client_session(const MConstRef<MClientSession>& m)
     break;
 
   case CEPH_SESSION_RECALL_STATE:
+  std::cout << pthread_self() << " " << __func__ << ":" << __LINE__ << "\n";
     /*
      * Call the renew caps and flush cap releases just before
      * triming the caps in case the tick() won't get a chance
@@ -2489,6 +2517,7 @@ void Client::handle_client_session(const MConstRef<MClientSession>& m)
     break;
 
   case CEPH_SESSION_FLUSHMSG:
+  std::cout << pthread_self() << " " << __func__ << ":" << __LINE__ << "\n";
     /* flush cap release */
     if (auto& m = session->release; m) {
       session->con->send_message2(std::move(m));
@@ -2497,10 +2526,12 @@ void Client::handle_client_session(const MConstRef<MClientSession>& m)
     break;
 
   case CEPH_SESSION_FORCE_RO:
+  std::cout << pthread_self() << " " << __func__ << ":" << __LINE__ << "\n";
     force_session_readonly(session.get());
     break;
 
   case CEPH_SESSION_REJECT:
+  std::cout << pthread_self() << " " << __func__ << ":" << __LINE__ << "\n";
     {
       std::string_view error_str;
       auto it = m->metadata.find("error_string");
@@ -2517,6 +2548,7 @@ void Client::handle_client_session(const MConstRef<MClientSession>& m)
   default:
     ceph_abort();
   }
+//  std::cout << pthread_self() << " " << __func__ << ":" << __LINE__ << "\n";
 }
 
 bool Client::_any_stale_sessions() const
@@ -3022,17 +3054,27 @@ bool Client::ms_dispatch2(const MessageRef &m)
   // unmounting?
   std::scoped_lock cl(client_lock);
   if (is_unmounting()) {
+//    std::cout << pthread_self() << " " << __func__ << ":" << __LINE__ << "\n";
     ldout(cct, 10) << "unmounting: trim pass, size was " << lru.lru_get_size() 
              << "+" << inode_map.size() << dendl;
+//    std::cout << pthread_self() << " " << __func__ << ":" << __LINE__ << "\n";
     uint64_t size = lru.lru_get_size() + inode_map.size();
+    std::cout << pthread_self() << " " << __func__ << ":" << __LINE__ << "\n";
     trim_cache();
+    std::cout << pthread_self() << " " << __func__ << ":" << __LINE__ << "\n";
     if (size > lru.lru_get_size() + inode_map.size()) {
+//    std::cout << pthread_self() << " " << __func__ << ":" << __LINE__ << "\n";
       ldout(cct, 10) << "unmounting: trim pass, cache shrank, poking unmount()" << dendl;
+//    std::cout << pthread_self() << " " << __func__ << ":" << __LINE__ << "\n";
       mount_cond.notify_all();
+//    std::cout << pthread_self() << " " << __func__ << ":" << __LINE__ << "\n";
     } else {
+//    std::cout << pthread_self() << " " << __func__ << ":" << __LINE__ << "\n";
       ldout(cct, 10) << "unmounting: trim pass, size still " << lru.lru_get_size() 
                << "+" << inode_map.size() << dendl;
+//    std::cout << pthread_self() << " " << __func__ << ":" << __LINE__ << "\n";
     }
+//    std::cout << pthread_self() << " " << __func__ << ":" << __LINE__ << "\n";
   }
 
   return true;
@@ -3198,7 +3240,10 @@ void Client::send_reconnect(MetaSession *session)
   for (ceph::unordered_map<vinodeno_t, Inode*>::iterator p = inode_map.begin();
        p != inode_map.end();
        ++p) {
-    Inode *in = p->second;
+    InodeRef in = p->second;
+
+    client_lock.unlock();
+    std::scoped_lock il{in->inode_lock};
     auto it = in->caps.find(mds);
     if (it != in->caps.end()) {
       if (allow_multi &&
@@ -3220,11 +3265,13 @@ void Client::send_reconnect(MetaSession *session)
       ldout(cct, 10) << "    path " << path << dendl;
 
       bufferlist flockbl;
-      _encode_filelocks(in, flockbl);
+      _encode_filelocks(in.get(), flockbl);
 
       cap.seq = 0;  // reset seq.
       cap.issue_seq = 0;  // reset seq.
       cap.mseq = 0;  // reset seq.
+
+      client_lock.lock();
       // cap gen should catch up with session cap_gen
       if (cap.gen < session->cap_gen) {
 	cap.gen = session->cap_gen;
@@ -3232,6 +3279,8 @@ void Client::send_reconnect(MetaSession *session)
       } else {
 	cap.issued = cap.implemented;
       }
+      client_lock.unlock();
+
       snapid_t snap_follows = 0;
       if (!in->cap_snaps.empty())
 	snap_follows = in->cap_snaps.begin()->first;
@@ -3251,6 +3300,7 @@ void Client::send_reconnect(MetaSession *session)
 	did_snaprealm.insert(in->snaprealm->ino);
       }
     }
+    client_lock.lock();
   }
 
   if (!allow_multi)
@@ -3585,7 +3635,7 @@ Dentry* Client::link(Dir *dir, const string& name, Inode *in, Dentry *dn)
 
 void Client::unlink(Dentry *dn, bool keepdir, bool keepdentry)
 {
-  std::cout << pthread_self() << " " << __func__ << ":" << __LINE__ << " ============= > dn : " << dn << "\n";
+//  std::cout << pthread_self() << " " << __func__ << ":" << __LINE__ << " ============= > dn : " << dn << "\n";
   ceph_assert(ceph_mutex_is_locked_by_me(dn->dir->parent_inode->inode_lock));
 
   InodeRef in(dn->inode);
@@ -4381,8 +4431,12 @@ void Client::signal_context_list(list<Context*>& ls)
 
 void Client::wake_up_session_caps(MetaSession *s, bool reconnect)
 {
+  ceph_assert(ceph_mutex_is_locked_by_me(client_lock));
+
   for (const auto &cap : s->caps) {
     auto &in = cap->inode;
+    client_lock.unlock();
+    std::scoped_lock il{in.inode_lock};
     if (reconnect) {
       in.requested_max_size = 0;
       in.wanted_max_size = 0;
@@ -4396,6 +4450,7 @@ void Client::wake_up_session_caps(MetaSession *s, bool reconnect)
       }
     }
     signal_cond_list(in.waitfor_caps);
+    client_lock.lock();
   }
 }
 
@@ -4761,7 +4816,9 @@ void Client::remove_session_caps(MetaSession *s, int err)
     if (dirty_caps) {
       lderr(cct) << __func__ << " still has dirty|flushing caps on " << *in << dendl;
       if (in->flushing_caps) {
+        client_lock.lock();
 	num_flushing_caps--;
+        client_lock.unlock();
 	in->flushing_cap_tids.clear();
       }
       in->flushing_caps = 0;
@@ -4849,8 +4906,11 @@ void Client::_invalidate_kernel_dcache()
       for (ceph::unordered_map<string, Dentry*>::iterator p = root->dir->dentries.begin();
          p != root->dir->dentries.end();
          ++p) {
-       if (p->second->inode)
-        _schedule_invalidate_dentry_callback(p->second, false);
+        if (p->second->inode) {
+          client_lock.unlock();
+          _schedule_invalidate_dentry_callback(p->second, false);
+          client_lock.lock();
+        }
       }
     }
   } else if (remount_cb) {
@@ -5026,11 +5086,16 @@ void Client::trim_caps(MetaSession *s, uint64_t max)
 
 void Client::force_session_readonly(MetaSession *s)
 {
+  ceph_assert(ceph_mutex_is_locked_by_me(client_lock));
+
   s->readonly = true;
   for (xlist<Cap*>::iterator p = s->caps.begin(); !p.end(); ++p) {
     auto &in = (*p)->inode;
+    client_lock.unlock();
+    std::scoped_lock il{in.inode_lock};
     if (in.caps_wanted() & CEPH_CAP_FILE_WR)
       signal_cond_list(in.waitfor_caps);
+    client_lock.lock();
   }
 }
 
@@ -5041,6 +5106,7 @@ int Client::mark_caps_flushing(Inode *in, ceph_tid_t* ptid)
   int flushing = in->dirty_caps;
   ceph_assert(flushing);
 
+  std::scoped_lock cl{client_lock};
   ceph_tid_t flush_tid = ++last_flush_tid;
   in->flushing_cap_tids[flush_tid] = flushing;
 
@@ -5146,6 +5212,8 @@ void Client::wait_sync_caps(Inode *in, ceph_tid_t want)
 
 void Client::wait_sync_caps(ceph_tid_t want)
 {
+  ceph_assert(ceph_mutex_is_locked_by_me(client_lock));
+
  retry:
   ldout(cct, 10) << __func__ << " want " << want  << " (last is " << last_flush_tid << ", "
 	   << num_flushing_caps << " total flushing)" << dendl;
@@ -5803,6 +5871,7 @@ void Client::handle_cap_flush_ack(MetaSession *session, Inode *in, Cap *cap, con
     if (it->first == flush_ack_tid)
       cleaned = it->second;
     if (it->first <= flush_ack_tid) {
+      std::scoped_lock cl(client_lock);
       session->flushing_caps_tids.erase(it->first);
       in->flushing_cap_tids.erase(it++);
       ++flushed;
@@ -5820,9 +5889,9 @@ void Client::handle_cap_flush_ack(MetaSession *session, Inode *in, Cap *cap, con
 
   if (flushed) {
     signal_cond_list(in->waitfor_caps);
+    std::scoped_lock cl(client_lock);
     if (session->flushing_caps_tids.empty() ||
 	*session->flushing_caps_tids.begin() > flush_ack_tid) {
-      std::scoped_lock cl(client_lock);
       sync_cond.notify_all();
     }
   }
@@ -5841,9 +5910,10 @@ void Client::handle_cap_flush_ack(MetaSession *session, Inode *in, Cap *cap, con
       in->flushing_caps &= ~cleaned;
       if (in->flushing_caps == 0) {
 	ldout(cct, 10) << " " << *in << " !flushing" << dendl;
-	num_flushing_caps--;
-       if (in->flushing_cap_tids.empty())
-	  in->flushing_cap_item.remove_myself();
+        std::scoped_lock cl{client_lock};
+        num_flushing_caps--;
+        if (in->flushing_cap_tids.empty())
+          in->flushing_cap_item.remove_myself();
       }
       if (!in->caps_dirty())
 	put_inode(in);
@@ -6881,6 +6951,8 @@ void Client::flush_mdlog(MetaSession *session)
 
 void Client::_abort_mds_sessions(int err)
 {
+  ceph_assert(ceph_mutex_is_locked_by_me(client_lock));
+
   for (auto p = mds_requests.begin(); p != mds_requests.end(); ) {
     auto req = p->second;
     ++p;
@@ -7075,6 +7147,8 @@ void Client::abort_conn()
 
 void Client::flush_cap_releases()
 {
+  ceph_assert(ceph_mutex_is_locked_by_me(client_lock));
+
   // send any cap releases
   for (auto &p : mds_sessions) {
     auto session = p.second;
@@ -7260,6 +7334,8 @@ void Client::collect_and_send_global_metrics() {
 
 void Client::renew_caps()
 {
+  ceph_assert(ceph_mutex_is_locked_by_me(client_lock));
+
   ldout(cct, 10) << "renew_caps()" << dendl;
   last_cap_renew = ceph_clock_now();
 
@@ -7272,6 +7348,8 @@ void Client::renew_caps()
 
 void Client::renew_caps(MetaSession *session)
 {
+  ceph_assert(ceph_mutex_is_locked_by_me(client_lock));
+
   ldout(cct, 10) << "renew_caps mds." << session->mds_num << dendl;
   session->last_cap_renew_request = ceph_clock_now();
   uint64_t seq = ++session->cap_renew_seq;
@@ -11765,6 +11843,7 @@ void Client::_release_filelocks(Fh *fh)
   fl.l_type = F_UNLCK;
 
   il.unlock();
+  client_lock.unlock();
   for (list<pair<int, ceph_filelock> >::iterator p = to_release.begin();
        p != to_release.end();
        ++p) {
@@ -11774,7 +11853,6 @@ void Client::_release_filelocks(Fh *fh)
     _do_filelock(in.get(), fh, p->first, CEPH_MDS_OP_SETFILELOCK, 0, &fl,
 		 p->second.owner, true);
   }
-  client_lock.unlock();
   il.lock();
   client_lock.lock();
 }
