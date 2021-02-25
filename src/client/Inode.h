@@ -288,7 +288,8 @@ struct Inode {
   Inode(Client *c, vinodeno_t vino, file_layout_t *newlayout, string lock_name)
     : client(c), ino(vino.ino), snapid(vino.snapid), delay_cap_item(this),
       dirty_cap_item(this), flushing_cap_item(this), snaprealm_item(this),
-      inode_lock(lock_name), oset((void *)this, newlayout->pool_id, this->ino, inode_lock)
+      inode_lock(ceph::make_mutex("Inode::inode_lock:" + lock_name)),
+      oset((void *)this, newlayout->pool_id, this->ino, inode_lock)
   {
     memset(&dir_layout, 0, sizeof(dir_layout));
   }
