@@ -31,7 +31,7 @@
 
 /* in ms -- 1 minute */
 #define MAX_WAIT	(60 * 1000)
-
+#if 0
 static void wait_for_atomic_bool(std::atomic_bool &recalled)
 {
   int i = 0;
@@ -397,3 +397,4 @@ TEST(LibCephFS, RecalledGetattr) {
   ceph_unmount(cmount1);
   ceph_release(cmount1);
 }
+#endif

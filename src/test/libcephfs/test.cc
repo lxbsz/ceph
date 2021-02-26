@@ -42,7 +42,7 @@
 #ifndef ALLPERMS
 #define ALLPERMS (S_ISUID|S_ISGID|S_ISVTX|S_IRWXU|S_IRWXG|S_IRWXO)
 #endif
-
+#if 0
 TEST(LibCephFS, OpenEmptyComponent) {
 
   pid_t mypid = getpid();
@@ -2009,7 +2009,7 @@ TEST(LibCephFS, OperationsOnRoot)
 
   ceph_shutdown(cmount);
 }
-
+#endif
 static void shutdown_racer_func()
 {
   const int niter = 32;
@@ -2051,7 +2051,7 @@ TEST(LibCephFS, ShutdownRace)
    */
 //  ASSERT_EQ(setrlimit(RLIMIT_NOFILE, &rold), 0);
 }
-
+#if 0
 static void get_current_time_utimbuf(struct utimbuf *utb)
 {
   utime_t t = ceph_clock_now();
@@ -2576,3 +2576,4 @@ TEST(LibCephFS, LookupVino) {
 
   ceph_shutdown(cmount);
 }
+#endif

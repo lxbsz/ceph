@@ -35,6 +35,7 @@
 #endif
 
 
+#if 0
 rados_t cluster;
 
 string key;
@@ -393,3 +394,4 @@ int main(int argc, char **argv)
 
   return r;
 }
+#endif
