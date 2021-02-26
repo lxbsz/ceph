@@ -55,7 +55,7 @@
     ASSERT_EQ(0, ceph_unmount(cmount));		\
     ASSERT_EQ(0, ceph_release(cmount));		\
   } while(0)
-
+#if 0
 static const mode_t fileMode = S_IRWXU | S_IRWXG | S_IRWXO;
 
 // Default wait time for normal and "slow" operations
@@ -643,3 +643,4 @@ TEST(LibCephFS, DISABLED_ThreesomeInterProcessLocking) {
   ASSERT_EQ(0, ceph_unlink(cmount, c_file));
   CLEANUP_CEPH();
 }
+#endif

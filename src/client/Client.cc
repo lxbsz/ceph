@@ -9875,7 +9875,6 @@ int Client::open(const char *relpath, int flags, const UserPerm& perms,
   if (r < 0)
     goto out;
 
-  ceph_assert(!ceph_mutex_is_locked_by_me(in->inode_lock));
   if (!created) {
     // posix says we can only check permissions of existing files
     if (cct->_conf->client_permissions) {
@@ -9885,10 +9884,8 @@ int Client::open(const char *relpath, int flags, const UserPerm& perms,
     }
   }
 
-  ceph_assert(!ceph_mutex_is_locked_by_me(in->inode_lock));
   if (!fh)
     r = _open(in.get(), flags, mode, &fh, perms);
-  ceph_assert(!ceph_mutex_is_locked_by_me(in->inode_lock));
   if (r >= 0) {
     // allocate a integer file descriptor
     ceph_assert(fh);
@@ -9897,8 +9894,7 @@ int Client::open(const char *relpath, int flags, const UserPerm& perms,
     ceph_assert(fd_map.count(r) == 0);
     fd_map[r] = fh;
   }
-  
-  ceph_assert(!ceph_mutex_is_locked_by_me(in->inode_lock));
+
  out:
   tout(cct) << r << std::endl;
   ldout(cct, 3) << "open exit(" << path << ", " << cflags << ") = " << r << dendl;
@@ -10226,8 +10222,12 @@ int Client::_open(Inode *in, int flags, mode_t mode, Fh **fhp,
     in->put_open_ref(cmode);
   }
 
-  std::scoped_lock cl(client_lock);
-  trim_cache();
+  il.unlock();
+  {
+    std::scoped_lock cl(client_lock);
+    trim_cache();
+  }
+  il.lock();
 
   return result;
 }
@@ -14936,7 +14936,6 @@ int Client::_ll_create(Inode *parent, const char *name, mode_t mode,
 {
   *fhp = NULL;
 
-  std::scoped_lock il(parent->inode_lock);
   vinodeno_t vparent = _get_vino(parent);
 
   ldout(cct, 8) << "_ll_create " << vparent << " " << name << " 0" << oct <<
@@ -14949,25 +14948,29 @@ int Client::_ll_create(Inode *parent, const char *name, mode_t mode,
   tout(cct) << ceph_flags_sys2wire(flags) << std::endl;
 
   bool created = false;
-  int r = _lookup(parent, name, caps, in, perms);
+  int r;
+  {
+    std::scoped_lock il(parent->inode_lock);
+    r = _lookup(parent, name, caps, in, perms);
 
-  if (r == 0 && (flags & O_CREAT) && (flags & O_EXCL))
-    return -EEXIST;
+    if (r == 0 && (flags & O_CREAT) && (flags & O_EXCL))
+      return -EEXIST;
 
-  if (r == -ENOENT && (flags & O_CREAT)) {
-    if (!fuse_default_permissions) {
-      r = may_create(parent, perms);
+    if (r == -ENOENT && (flags & O_CREAT)) {
+      if (!fuse_default_permissions) {
+        r = may_create(parent, perms);
+        if (r < 0)
+	  goto out;
+      }
+      r = _create(parent, name, flags, mode, in, fhp, 0, 0, 0, NULL, &created,
+                  perms, "");
       if (r < 0)
-	goto out;
+        goto out;
     }
-    r = _create(parent, name, flags, mode, in, fhp, 0, 0, 0, NULL, &created,
-		perms, "");
+
     if (r < 0)
       goto out;
   }
-
-  if (r < 0)
-    goto out;
 
   ceph_assert(*in);
 
