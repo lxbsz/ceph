@@ -101,6 +101,7 @@ public:
   int init()
   {
     int ret;
+    std::stringstream ss;
 
     if (!cct->_log->is_started()) {
       cct->_log->start();
@@ -127,7 +128,8 @@ public:
 
     //at last the client
     ret = -CEPHFS_ERROR_NEW_CLIENT; //defined in libcephfs.h;
-    client = new StandaloneClient(messenger, monclient, icp->get_io_context());
+    ss << pthread_self() << ":" << std::rand();
+    client = new StandaloneClient(messenger, monclient, icp->get_io_context(), ss.str());
     if (!client)
       goto fail;
 

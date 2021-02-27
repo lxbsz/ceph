@@ -295,9 +295,63 @@ vinodeno_t Client::map_faked_ino(ino_t ino)
 
 // cons/des
 
+Client::Client(Messenger *m, MonClient *mc, Objecter *objecter_,
+               const std::string unique_id)
+  : Dispatcher(m->cct),
+    timer_lock(ceph::make_mutex("Client::timer_lock" + unique_id)),
+    timer(m->cct, timer_lock, false),
+    client_lock(ceph::make_mutex("Client::client_lock" + unique_id)),
+    messenger(m),
+    monclient(mc),
+    objecter(objecter_),
+    whoami(mc->get_global_id()),
+    mount_state(CLIENT_UNMOUNTED, "Client::mountstate_lock"),
+    initialize_state(CLIENT_NEW, "Client::initstate_lock"),
+    async_ino_invalidator(m->cct),
+    async_dentry_invalidator(m->cct),
+    interrupt_finisher(m->cct),
+    remount_finisher(m->cct),
+    async_ino_releasor(m->cct),
+    objecter_finisher(m->cct),
+    m_command_hook(this),
+    fscid(0)
+{
+  _reset_faked_inos();
+
+  user_id = cct->_conf->client_mount_uid;
+  group_id = cct->_conf->client_mount_gid;
+  fuse_default_permissions = cct->_conf.get_val<bool>(
+    "fuse_default_permissions");
+
+  if (cct->_conf->client_acl_type == "posix_acl")
+    acl_type = POSIX_ACL;
+
+  lru.lru_set_midpoint(cct->_conf->client_cache_mid);
+
+  // file handles
+  free_fd_set.insert(10, 1<<30);
+
+  mdsmap.reset(new MDSMap);
+
+  // osd interfaces
+  writeback_handler.reset(new ObjecterWriteback(objecter, &objecter_finisher,
+					    &client_lock));
+  objectcacher.reset(new ObjectCacher(cct, "libcephfs", *writeback_handler,
+				  client_flush_set_callback,    // all commit callback
+				  (void*)this,
+				  cct->_conf->client_oc_size,
+				  cct->_conf->client_oc_max_objects,
+				  cct->_conf->client_oc_max_dirty,
+				  cct->_conf->client_oc_target_dirty,
+				  cct->_conf->client_oc_max_dirty_age,
+				  true));
+}
+
 Client::Client(Messenger *m, MonClient *mc, Objecter *objecter_)
   : Dispatcher(m->cct),
+    timer_lock(ceph::make_mutex("Client::timer_lock")),
     timer(m->cct, timer_lock, false),
+    client_lock(ceph::make_mutex("Client::client_lock")),
     messenger(m),
     monclient(mc),
     objecter(objecter_),
@@ -935,7 +989,7 @@ void Client::get_inode_lock_name(std::string &name, vinodeno_t vino)
   // allow different inode locks to be held at the
   // same time
   std::stringstream ss;
-  ss << vino;
+  ss << vino << ":" << pthread_self() << ":" << std::rand();
   name = ss.str();
 }
 
@@ -16547,6 +16601,15 @@ mds_rank_t Client::_get_random_up_mds() const
 StandaloneClient::StandaloneClient(Messenger *m, MonClient *mc,
 				   boost::asio::io_context& ictx)
   : Client(m, mc, new Objecter(m->cct, m, mc, ictx))
+{
+  monclient->set_messenger(m);
+  objecter->set_client_incarnation(0);
+}
+
+StandaloneClient::StandaloneClient(Messenger *m, MonClient *mc,
+				   boost::asio::io_context& ictx,
+                                   const std::string unique_id)
+  : Client(m, mc, new Objecter(m->cct, m, mc, ictx), unique_id)
 {
   monclient->set_messenger(m);
   objecter->set_client_incarnation(0);

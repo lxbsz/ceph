@@ -281,6 +281,7 @@ public:
   };
 
   Client(Messenger *m, MonClient *mc, Objecter *objecter_);
+  Client(Messenger *m, MonClient *mc, Objecter *objecter_, const std::string unique_id);
   Client(const Client&) = delete;
   Client(const Client&&) = delete;
   virtual ~Client() override;
@@ -818,7 +819,7 @@ public:
   xlist<Inode*> &get_dirty_list() { return dirty_list; }
 
   /* timer_lock for 'timer' */
-  ceph::mutex timer_lock = ceph::make_mutex("Client::timer_lock");
+  ceph::mutex timer_lock; // = ceph::make_mutex("Client::timer_lock");
   SafeTimer timer;
 
   /* tick thread */
@@ -1039,7 +1040,7 @@ protected:
 
   // global client lock
   //  - protects Client and buffer cache both!
-  ceph::mutex client_lock = ceph::make_mutex("Client::client_lock");
+  ceph::mutex client_lock;// = ceph::make_mutex("Client::client_lock");
 
   std::map<snapid_t, int> ll_snap_ref;
 
@@ -1516,6 +1517,7 @@ class StandaloneClient : public Client
 {
 public:
   StandaloneClient(Messenger *m, MonClient *mc, boost::asio::io_context& ictx);
+  StandaloneClient(Messenger *m, MonClient *mc, boost::asio::io_context& ictx, const std::string unique_id);
 
   ~StandaloneClient() override;
 

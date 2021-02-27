@@ -157,6 +157,7 @@ static int _lockdep_register(const char *name)
 {
   int id = -1;
 
+//  std::cout << pthread_self() << " " << __func__ << ":" << __LINE__ << " name: " << name << " lock_ids: " << &lock_ids << "\n";
   if (!g_lockdep)
     return id;
   ceph::unordered_map<std::string, int>::iterator p = lock_ids.find(name);
@@ -175,10 +176,10 @@ static int _lockdep_register(const char *name)
     }
     lock_ids[name] = id;
     lock_names[id] = name;
-    lockdep_dout(10) << "registered '" << name << "' as " << id << dendl;
+    std::cout << pthread_self() << " " << "registered '" << name << "' as " << id << "\n";
   } else {
     id = p->second;
-    lockdep_dout(20) << "had '" << name << "' as " << id << dendl;
+    std::cout << pthread_self() << " " << "had '" << name << "' as " << id << "\n";
   }
 
   ++lock_refs[id];
