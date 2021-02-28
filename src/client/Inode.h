@@ -231,7 +231,7 @@ struct Inode {
   uint64_t wanted_max_size = 0;
   uint64_t requested_max_size = 0;
 
-  int       _ref = 0;      // ref count. 1 for each dentry, fh that links to me.
+  std::atomic<int64_t> _ref = 0;// ref count. 1 for each dentry, fh that links to me.
   uint64_t  ll_ref = 0;   // separate ref count for ll client
   xlist<Dentry *> dentries; // if i'm linked to a dentry.
   string    symlink;  // symlink content, if it's a symlink
