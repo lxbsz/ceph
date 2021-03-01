@@ -767,37 +767,27 @@ void Client::trim_cache(bool trim_kernel_dcache)
 
   if (trim_kernel_dcache && lru.lru_get_size() > max)
     _invalidate_kernel_dcache();
-
+#if 0
   if (!root)
     return;
 
-//  std::cout << pthread_self() << " " << __func__ << ":" << __LINE__ << "\n";
   // hose root?
-  InodeRef tmp = root;
+//  InodeRef tmp = root;
   client_lock.unlock();
   std::unique_lock il{root->inode_lock};
   client_lock.lock();
   if (lru.lru_get_size() == 0 && root->get_num_ref() == 0 && inode_map.size() == 1 + root_parents.size()) {
     ldout(cct, 15) << "trim_cache trimmed root " << root << dendl;
-//  std::cout << pthread_self() << " " << __func__ << ":" << __LINE__ << "\n";
-//    ceph_assert(ceph_mutex_is_locked_by_me(root->inode_lock));
-//    ceph_assert(ceph_mutex_is_locked(root->inode_lock));
     il.unlock();
     delete root;
-//  std::cout << pthread_self() << " " << __func__ << ":" << __LINE__ << "\n";
     root = 0;
-//  std::cout << pthread_self() << " " << __func__ << ":" << __LINE__ << "\n";
     root_ancestor = 0;
-//  std::cout << pthread_self() << " " << __func__ << ":" << __LINE__ << "\n";
     while (!root_parents.empty())
       root_parents.erase(root_parents.begin());
-//  std::cout << pthread_self() << " " << __func__ << ":" << __LINE__ << "\n";
     inode_map.clear();
-//  std::cout << pthread_self() << " " << __func__ << ":" << __LINE__ << "\n";
     _reset_faked_inos();
-//  std::cout << pthread_self() << " " << __func__ << ":" << __LINE__ << "\n";
   }
-//  std::cout << pthread_self() << " " << __func__ << ":" << __LINE__ << "\n";
+#endif
 }
 
 void Client::trim_cache_for_reconnect(MetaSession *s)
