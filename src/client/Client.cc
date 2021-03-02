@@ -152,10 +152,14 @@ namespace ca = ceph::async;
 
 void client_flush_set_callback(void *p, ObjectCacher::ObjectSet *oset)
 {
-  InodeRef in = static_cast<Inode *>(oset->parent);
+  Client *client = static_cast<Client*>(p);
+  InodeRef in;
+  {
+    std::scoped_lock cl{client->client_lock};
+    in = static_cast<Inode *>(oset->parent);
+  }
   ceph_assert(ceph_mutex_is_locked_by_me(in->inode_lock));
 
-  Client *client = static_cast<Client*>(p);
   client->flush_set_callback(oset);
 }
 
@@ -472,11 +476,9 @@ void Client::dump_cache(Formatter *f)
   if (f)
     f->open_array_section("cache");
 
-  InodeRef in = NULL;
-  if (root)
-    in = root;
+  InodeRef in = root;
   client_lock.unlock();
-  if (in)
+  if (in != nullptr)
     dump_inode(f, in.get(), did, true);
   client_lock.lock();
 
@@ -1127,7 +1129,11 @@ Dentry *Client::insert_dentry_inode(Dir *dir, const string& dname, LeaseStat *dl
   }
   
   if (!dn || !dn->inode) {
-    InodeRef tmp_ref(in);
+    InodeRef tmp_ref;
+    {
+      std::scoped_lock cl{client_lock};
+      tmp_ref = in;
+    }
     if (old_dentry) {
       if (old_dentry->dir != dir) {
 	Inode *old_diri = old_dentry->dir->parent_inode;
@@ -1886,8 +1892,9 @@ int Client::verify_reply_trace(int r, MetaSession *session,
 	  ldout(cct, 5) << "create got ino " << created_ino << " but then failed on lookup; EINTR?" << dendl;
 	  r = -EINTR;
 	}
-	if (ptarget)
+	if (ptarget) {
 	  ptarget->swap(target);
+	}
       }
     }
   }
@@ -3473,6 +3480,7 @@ void Client::_put_inode(Inode *in, int n)
 
   ldout(cct, 10) << __func__ << " on " << *in << " n = " << n << dendl;
 
+  std::scoped_lock cl{client_lock};
   int left = in->get_nref();
   ceph_assert(left >= n + 1);
   in->iput(n);
@@ -3485,7 +3493,6 @@ void Client::_put_inode(Inode *in, int n)
     bool unclean = objectcacher->release_set(&in->oset);
     ceph_assert(!unclean);
 
-    std::unique_lock cl{client_lock};
     inode_map.erase(in->vino());
     if (use_faked_inos())
       _release_faked_ino(in);
@@ -3579,7 +3586,10 @@ Dentry* Client::link(Dir *dir, const string& name, Inode *in, Dentry *dn)
       std::unique_lock il{in->inode_lock};
       // only one parent for directories!
       if (in->is_dir() && !in->dentries.empty()) {
-        tmp_ref = in; // prevent unlink below from freeing the inode.
+        {
+          std::scoped_lock cl{client_lock};
+          tmp_ref = in; // prevent unlink below from freeing the inode.
+        }
         Dentry *olddn = in->get_first_parent();
         ceph_assert(olddn->dir != dir || olddn->name != name);
         Inode *old_diri = olddn->dir->parent_inode;
@@ -3611,7 +3621,11 @@ void Client::unlink(Dentry *dn, bool keepdir, bool keepdentry)
 {
   ceph_assert(ceph_mutex_is_locked_by_me(dn->dir->parent_inode->inode_lock));
 
-  InodeRef in(dn->inode);
+  InodeRef in;
+  {
+    std::scoped_lock cl{client_lock};
+    in = dn->inode;
+  }
   ldout(cct, 15) << "unlink dir " << dn->dir->parent_inode << " '" << dn->name << "' dn " << dn
 		 << " inode " << dn->inode << dendl;
 
@@ -3659,7 +3673,10 @@ private:
   Client *client;
   InodeRef inode;
 public:
-  C_Client_FlushComplete(Client *c, Inode *in) : client(c), inode(in) { }
+  C_Client_FlushComplete(Client *c, Inode *in) : client(c) {
+    std::scoped_lock cl{client->client_lock};
+    inode = in;
+  }
   void finish(int r) override {
     std::scoped_lock il{inode->inode_lock};
     if (r != 0) {
@@ -3684,11 +3701,13 @@ void Client::get_cap_ref(Inode *in, int cap)
   if ((cap & CEPH_CAP_FILE_BUFFER) &&
       in->cap_refs[CEPH_CAP_FILE_BUFFER] == 0) {
     ldout(cct, 5) << __func__ << " got first FILE_BUFFER ref on " << *in << dendl;
+    std::unique_lock cl{client_lock};
     in->iget();
   }
   if ((cap & CEPH_CAP_FILE_CACHE) &&
       in->cap_refs[CEPH_CAP_FILE_CACHE] == 0) {
     ldout(cct, 5) << __func__ << " got first FILE_CACHE ref on " << *in << dendl;
+    std::unique_lock cl{client_lock};
     in->iget();
   }
   in->get_cap_ref(cap);
@@ -4717,13 +4736,13 @@ void Client::remove_cap(Cap *cap, bool queue_release)
 {
   auto &in = cap->inode;
   ceph_assert(ceph_mutex_is_locked_by_me(in.inode_lock));
+  ceph_assert(ceph_mutex_is_locked_by_me(client_lock));
 
   MetaSession *session = cap->session;
   mds_rank_t mds = cap->session->mds_num;
 
   ldout(cct, 10) << __func__ << " mds." << mds << " on " << in << dendl;
 
-  std::scoped_lock cl{client_lock};
   if (queue_release) {
     session->enqueue_cap_release(
       in.ino,
@@ -4755,6 +4774,7 @@ void Client::remove_cap(Cap *cap, bool queue_release)
 void Client::remove_all_caps(Inode *in)
 {
   ceph_assert(ceph_mutex_is_locked_by_me(in->inode_lock));
+  ceph_assert(ceph_mutex_is_locked_by_me(client_lock));
 
   while (!in->caps.empty())
     remove_cap(&in->caps.begin()->second, true);
@@ -4784,7 +4804,9 @@ void Client::remove_session_caps(MetaSession *s, int err)
     auto caps = cap->implemented;
     if (cap->wanted | cap->issued)
       in->flags |= I_CAP_DROPPED;
+    client_lock.lock();
     remove_cap(cap, false);
+    client_lock.unlock();
     in->cap_snaps.clear();
     if (dirty_caps) {
       lderr(cct) << __func__ << " still has dirty|flushing caps on " << *in << dendl;
@@ -4928,7 +4950,12 @@ void Client::_trim_negative_child_dentries(InodeRef& in)
   }
 
   if (in->flags & I_SNAPDIR_OPEN) {
-    InodeRef snapdir = open_snapdir(in.get());
+    Inode *tmp = open_snapdir(in.get());
+    InodeRef snapdir;
+    {
+      std::scoped_lock cl{client_lock};
+      snapdir = tmp;
+    }
     il.unlock();
     std::scoped_lock sil{snapdir->inode_lock};
     _trim_negative_child_dentries(snapdir);
@@ -5005,7 +5032,9 @@ void Client::trim_caps(MetaSession *s, uint64_t max)
       // disposable non-auth cap
       if (!(get_caps_used(in.get()) & ~oissued & mine)) {
 	ldout(cct, 20) << " removing unused, unneeded non-auth cap on " << *in << dendl;
+        client_lock.lock();
 	cap = (remove_cap(cap, true), nullptr);
+        client_lock.unlock();
 	trimmed++;
       }
     } else {
@@ -5260,15 +5289,15 @@ void Client::kick_flushing_caps(MetaSession *session)
     anchor.emplace_back(*p);
   }
 
-  client_lock.unlock();
   for (InodeRef &in : anchor) {
+    client_lock.unlock();
     std::scoped_lock il{in->inode_lock};
     if (in->flags & I_KICK_FLUSH) {
       ldout(cct, 20) << " reflushing caps on " << *in << " to mds." << mds << dendl;
       kick_flushing_caps(in.get(), session);
     }
+    client_lock.lock();
   }
-  client_lock.lock();
 }
 
 void Client::early_kick_flushing_caps(MetaSession *session)
@@ -5281,8 +5310,8 @@ void Client::early_kick_flushing_caps(MetaSession *session)
     anchor.emplace_back(*p);
   }
 
-  client_lock.unlock();
   for (InodeRef &in : anchor) {
+    client_lock.unlock();
     std::scoped_lock il{in->inode_lock};
 
     Cap *cap = in->auth_cap;
@@ -5293,6 +5322,7 @@ void Client::early_kick_flushing_caps(MetaSession *session)
     // the flushing caps to other client.
     if ((in->flushing_caps & in->auth_cap->issued) == in->flushing_caps) {
       in->flags |= I_KICK_FLUSH;
+      client_lock.lock();
       continue;
     }
 
@@ -5306,8 +5336,8 @@ void Client::early_kick_flushing_caps(MetaSession *session)
     cap->issued = cap->implemented;
 
     kick_flushing_caps(in.get(), session);
+    client_lock.lock();
   }
-  client_lock.lock();
 }
 
 void SnapRealm::build_snap_context()
@@ -5736,6 +5766,7 @@ void Client::handle_cap_import(MetaSession *session, Inode *in, const MConstRef<
 		 m->get_realm(), CEPH_CAP_FLAG_AUTH, cap_perms);
   
   if (cap && cap->cap_id == m->peer.cap_id) {
+      std::scoped_lock cl(client_lock);
       remove_cap(cap, (m->peer.flags & CEPH_CAP_FLAG_RELEASE));
   }
 
@@ -5802,6 +5833,7 @@ void Client::handle_cap_export(MetaSession *session, Inode *in, const MConstRef<
 	  in->flags |= I_CAP_DROPPED;
       }
 
+      std::scoped_lock cl(client_lock);
       remove_cap(&cap, false);
     }
   }
@@ -5904,6 +5936,8 @@ void Client::handle_cap_flushsnap_ack(MetaSession *session, Inode *in, const MCo
 {
   ceph_tid_t flush_ack_tid = m->get_client_tid();
   mds_rank_t mds = session->mds_num;
+
+  std::scoped_lock il{in->inode_lock};
   ceph_assert(in->caps.count(mds));
   snapid_t follows = m->get_snap_follows();
 
@@ -5912,7 +5946,11 @@ void Client::handle_cap_flushsnap_ack(MetaSession *session, Inode *in, const MCo
     if (flush_ack_tid != capsnap.flush_tid) {
       ldout(cct, 10) << " tid " << flush_ack_tid << " != " << capsnap.flush_tid << dendl;
     } else {
-      InodeRef tmp_ref(in);
+      InodeRef tmp_ref;
+      {
+        std::scoped_lock il{in->inode_lock};
+        tmp_ref = in;
+      }
       ldout(cct, 5) << __func__ << " mds." << mds << " flushed snap follows " << follows
 	      << " on " << *in << dendl;
       session->flushing_caps_tids.erase(capsnap.flush_tid);
@@ -6025,7 +6063,12 @@ void Client::_try_to_trim_inode(Inode *in, bool sched_inval)
   }
 
   if (ref > 1 && (in->flags & I_SNAPDIR_OPEN)) {
-    InodeRef snapdir = open_snapdir(in);
+    Inode * tmp = open_snapdir(in);
+    InodeRef snapdir;
+    {
+      std::unique_lock cl{client_lock};
+      snapdir = tmp;
+    }
     in->inode_lock.unlock();
     std::scoped_lock sil(snapdir->inode_lock);
     _try_to_trim_inode(snapdir.get(), false);
@@ -7426,19 +7469,22 @@ int Client::_lookup(Inode *dir, const string& dname, int mask, InodeRef *target,
       }
       dir->inode_lock.lock();
 
+      std::scoped_lock cl{client_lock};
       if (r == 0) {
 	*target = std::move(tmptarget);
 	ldout(cct, 8) << __func__ << " found target " << (*target)->ino << dendl;
       } else {
 	*target = dir;
       }
-    }
-    else
+    } else {
+      std::scoped_lock cl{client_lock};
       *target = dir->get_first_parent()->dir->parent_inode; //dirs can't be hard-linked
+    }
     goto done;
   }
 
   if (dname == ".") {
+    std::scoped_lock cl{client_lock};
     *target = dir;
     goto done;
   }
@@ -7455,7 +7501,9 @@ int Client::_lookup(Inode *dir, const string& dname, int mask, InodeRef *target,
 
   if (dname == cct->_conf->client_snapdir &&
       dir->snapid == CEPH_NOSNAP) {
-    *target = open_snapdir(dir);
+    Inode *tmp = open_snapdir(dir);
+    std::scoped_lock cl{client_lock};
+    *target = tmp;
     goto done;
   }
 
@@ -7512,9 +7560,10 @@ relookup:
 
  hit_dn:
   if (dn->inode) {
-    *target = dn->inode;
     if (alternate_name)
       *alternate_name = dn->alternate_name;
+    std::scoped_lock cl{client_lock};
+    *target = dn->inode;
   } else {
     r = -ENOENT;
   }
@@ -7569,6 +7618,7 @@ int Client::path_walk(const filepath& origpath, InodeRef *end,
 {
   walk_dentry_result wdr;
   int rc = path_walk(origpath, &wdr, perms, followsym, mask);
+  std::scoped_lock cl(client_lock);
   *end = std::move(wdr.in);
   return rc;
 }
@@ -7655,12 +7705,14 @@ int Client::path_walk(const filepath& origpath, walk_dentry_result* result, cons
 	continue;
       }
     }
+    std::scoped_lock cl(client_lock);
     cur.swap(next);
     i++;
   }
   if (!cur)
     return -ENOENT;
   if (result) {
+    std::scoped_lock cl(client_lock);
     result->in = std::move(cur);
     result->alternate_name = std::move(alternate_name);
   }
@@ -7862,6 +7914,7 @@ int Client::mkdirs(const char *relpath, mode_t mode, const UserPerm& perms)
     r = _lookup(cur.get(), path[i].c_str(), caps, &next, perms);
     if (r < 0)
       break;
+    std::scoped_lock cl{client_lock};
     cur.swap(next);
   }
   if (r!=-ENOENT) return r;
@@ -9439,6 +9492,7 @@ int Client::readdir_r_cb(dir_result_t *d, add_dirent_cb_t cb, void *p,
     cl.unlock();
     {
       std::scoped_lock il{diri->inode_lock};
+      std::scoped_lock cl{client_lock};
       if (diri->dentries.empty())
         in = diri;
       else
@@ -11271,7 +11325,10 @@ int Client::_fsync(Inode *in, bool syncdataonly)
   std::unique_lock il(in->inode_lock);
   if (cct->_conf->client_oc) {
     object_cacher_completion.reset(new C_SaferCond("Client::_fsync::lock"));
-    tmp_ref = in; // take a reference; C_SaferCond doesn't and _flush won't either
+    {
+      std::scoped_lock cl(client_lock);
+      tmp_ref = in; // take a reference; C_SaferCond doesn't and _flush won't either
+    }
     _flush(in, object_cacher_completion.get());
     ldout(cct, 15) << "using return-valued form of _fsync" << dendl;
   }
@@ -12504,7 +12561,10 @@ void Client::_ll_get(Inode *in)
   ceph_assert(ceph_mutex_is_locked_by_me(in->inode_lock));
 
   if (in->ll_ref == 0) {
-    in->iget();
+    {
+      std::unique_lock cl{client_lock};
+      in->iget();
+    }
     if (in->is_dir() && !in->dentries.empty()) {
       ceph_assert(in->dentries.size() == 1); // dirs can't be hard-linked
       Dentry *dn = in->get_first_parent();
