@@ -4441,10 +4441,13 @@ void Client::wake_up_session_caps(MetaSession *s, bool reconnect)
 {
   ceph_assert(ceph_mutex_is_locked_by_me(client_lock));
 
+  xlist<Inode*> tmp_list;
   for (const auto &cap : s->caps) {
     auto &in = cap->inode;
+    tmp_list.push_back(&in->dirty_cap_item);
     client_lock.unlock();
     std::scoped_lock il{in.inode_lock};
+    client_lock.lock();
     if (reconnect) {
       in.requested_max_size = 0;
       in.wanted_max_size = 0;
@@ -4458,7 +4461,6 @@ void Client::wake_up_session_caps(MetaSession *s, bool reconnect)
       }
     }
     signal_cond_list(in.waitfor_caps);
-    client_lock.lock();
   }
 }
 
@@ -4662,12 +4664,14 @@ void Client::add_update_cap(Inode *in, MetaSession *mds_session, uint64_t cap_id
   }
 
   mds_rank_t mds = mds_session->mds_num;
-  const auto &capem = in->caps.emplace(std::piecewise_construct, std::forward_as_tuple(mds), std::forward_as_tuple(*in, mds_session));
-  Cap &cap = capem.first->second;
-
   uint64_t s_cap_gen;
+  Cap *cap;
   {
     std::scoped_lock cl{client_lock};
+
+    // put the Cap constructor under client_lock
+    const auto &capem = in->caps.emplace(std::piecewise_construct, std::forward_as_tuple(mds), std::forward_as_tuple(*in, mds_session));
+    cap = &capem.first->second;
     s_cap_gen = mds_session->cap_gen;
   }
 
