@@ -3904,6 +3904,8 @@ void Client::cap_delay_requeue(Inode *in)
   ldout(cct, 10) << __func__ << " on " << *in << dendl;
   in->hold_caps_until = ceph_clock_now();
   in->hold_caps_until += cct->_conf->client_caps_release_delay;
+
+  std::scoped_lock cl{client_lock};
   delayed_list.push_back(&in->delay_cap_item);
 }
 
@@ -5129,23 +5131,29 @@ int Client::mark_caps_flushing(Inode *in, ceph_tid_t* ptid)
   int flushing = in->dirty_caps;
   ceph_assert(flushing);
 
-  std::scoped_lock cl{client_lock};
-  ceph_tid_t flush_tid = ++last_flush_tid;
-  in->flushing_cap_tids[flush_tid] = flushing;
+  ceph_tid_t flush_tid;
+  {
+    std::scoped_lock cl{client_lock};
+    flush_tid = ++last_flush_tid;
+    in->flushing_cap_tids[flush_tid] = flushing;
 
-  if (!in->flushing_caps) {
-    ldout(cct, 10) << __func__ << " " << ccap_string(flushing) << " " << *in << dendl;
-    num_flushing_caps++;
-  } else {
-    ldout(cct, 10) << __func__ << " (more) " << ccap_string(flushing) << " " << *in << dendl;
+    if (!in->flushing_caps) {
+      ldout(cct, 10) << __func__ << " " << ccap_string(flushing) << " " << *in << dendl;
+      num_flushing_caps++;
+    } else {
+      ldout(cct, 10) << __func__ << " (more) " << ccap_string(flushing) << " " << *in << dendl;
+    }
   }
 
   in->flushing_caps |= flushing;
   in->mark_caps_clean();
- 
-  if (!in->flushing_cap_item.is_on_list())
-    session->flushing_caps.push_back(&in->flushing_cap_item);
-  session->flushing_caps_tids.insert(flush_tid);
+
+  {
+    std::scoped_lock cl{client_lock};
+    if (!in->flushing_cap_item.is_on_list())
+      session->flushing_caps.push_back(&in->flushing_cap_item);
+    session->flushing_caps_tids.insert(flush_tid);
+  }
 
   *ptid = flush_tid;
   return flushing;
@@ -5198,15 +5206,19 @@ void Client::flush_caps_sync()
       check_caps(in.get(), flags);
     }
     client_lock.lock();
+
+    p = delayed_list.begin();
   }
 
   // other caps, too
   p = dirty_list.begin();
+  xlist<Inode*> tmp_list;
   while (!p.end()) {
     unsigned flags = CHECK_CAPS_NODELAY;
     InodeRef in = *p;
 
     ++p;
+    tmp_list.push_back(&in->dirty_cap_item);
     if (p.end())
       flags |= CHECK_CAPS_SYNCHRONOUS;
 
@@ -5216,6 +5228,16 @@ void Client::flush_caps_sync()
       check_caps(in.get(), flags);
     }
     client_lock.lock();
+
+    p = dirty_list.begin();
+  }
+
+  p = tmp_list.begin();
+  while (!p.end()) {
+    InodeRef in = *p;
+
+    ++p;
+    dirty_list.push_back(&in->dirty_cap_item);
   }
 }
 
@@ -7141,32 +7163,41 @@ void Client::_unmount(bool abort)
 
       cl.unlock();
       std::scoped_lock il(in->inode_lock);
-      cl.lock();
       if (abort || blocklisted) {
-        cl.unlock();
         objectcacher->purge_set(&in->oset);
-        cl.lock();
       } else if (!in->caps.empty()) {
-        cl.unlock();
 	_release(in);
 	_flush(in, new C_Client_FlushComplete(this, in));
-        cl.lock();
       }
+      cl.lock();
     }
   }
 
   if (abort || blocklisted) {
-    for (auto p = dirty_list.begin(); !p.end(); ) {
-      Inode *in = *p;
+    xlist<Inode*> tmp_list;
+    auto p = dirty_list.begin();
+    while (!p.end()) {
+      InodeRef in = *p;
       ++p;
+      tmp_list.push_back(&in->dirty_cap_item);
       cl.unlock();
-      std::scoped_lock il(in->inode_lock);
-      if (in->dirty_caps) {
-	ldout(cct, 0) << " drop dirty caps on " << *in << dendl;
-	in->mark_caps_clean();
-	put_inode(in);
+      {
+        std::scoped_lock il(in->inode_lock);
+        if (in->dirty_caps) {
+	  ldout(cct, 0) << " drop dirty caps on " << *in << dendl;
+	  in->mark_caps_clean();
+	  put_inode(in.get());
+        }
       }
       cl.lock();
+      p = dirty_list.begin();
+    }
+    p = tmp_list.begin();
+    while (!p.end()) {
+      InodeRef in = *p;
+
+      ++p;
+      dirty_list.push_back(&in->dirty_cap_item);
     }
   } else {
     flush_caps_sync();
@@ -7290,12 +7321,17 @@ void Client::tick()
     client_lock.lock();
     if (!mount_aborted && in->hold_caps_until > now)
       break;
-    delayed_list.pop_front();
-    if (!mount_aborted) {
-      client_lock.unlock();
-      check_caps(in.get(), CHECK_CAPS_NODELAY);
-      client_lock.lock();
+
+    // If still on the delayed list, check the caps
+    if (in->delay_cap_item.is_on_list()) {
+      in->delay_cap_item.remove_myself();
+      if (!mount_aborted) {
+        client_lock.unlock();
+        check_caps(in.get(), CHECK_CAPS_NODELAY);
+        client_lock.lock();
+      }
     }
+    p = delayed_list.begin();
   }
 
   if (!mount_aborted)

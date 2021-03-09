@@ -770,6 +770,8 @@ void Inode::mark_caps_dirty(int caps)
   if (caps && !caps_dirty())
     iget();
   dirty_caps |= caps;
+
+  std::scoped_lock cl(client->client_lock);
   client->get_dirty_list().push_back(&dirty_cap_item);
 }
 
@@ -780,6 +782,8 @@ void Inode::mark_caps_clean()
 {
   lsubdout(client->cct, client, 10) << __func__ << " " << *this << dendl;
   dirty_caps = 0;
+
+  std::scoped_lock cl(client->client_lock);
   dirty_cap_item.remove_myself();
 }
 
