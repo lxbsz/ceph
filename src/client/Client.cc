@@ -574,9 +574,9 @@ void Client::_finish_init()
     plb.add_time_avg(l_c_fsync, "fsync", "Latency of a file sync operation");
     logger.reset(plb.create_perf_counters());
     cct->get_perfcounters_collection()->add(logger.get());
-  }
 
-  cct->_conf.add_observer(this);
+    cct->_conf.add_observer(this);
+  }
 
   AdminSocket* admin_socket = cct->get_admin_socket();
   int ret = admin_socket->register_command("mds_requests",
@@ -624,7 +624,7 @@ void Client::shutdown()
   // If we were not mounted, but were being used for sending
   // MDS commands, we may have sessions that need closing.
   {
-    std::scoped_lock l{client_lock};
+    std::scoped_lock cl{client_lock};
 
     // To make sure the tick thread will be stoppped before
     // destructing the Client, just in case like the _mount()
@@ -634,10 +634,10 @@ void Client::shutdown()
     upkeep_cond.notify_one();
 
     _close_sessions();
-  }
-  cct->_conf.remove_observer(this);
 
-  cct->get_admin_socket()->unregister_commands(&m_command_hook);
+    cct->_conf.remove_observer(this);
+    cct->get_admin_socket()->unregister_commands(&m_command_hook);
+  }
 
   if (ino_invalidate_cb) {
     ldout(cct, 10) << "shutdown stopping cache invalidator finisher" << dendl;
@@ -2337,6 +2337,8 @@ MetaSessionRef Client::_get_or_open_mds_session(mds_rank_t mds)
  */
 void Client::populate_metadata(const std::string &mount_root)
 {
+  ceph_assert(ceph_mutex_is_locked_by_me(client_lock));
+
   // Hostname
 #ifdef _WIN32
   // TODO: move this to compat.h
@@ -3917,9 +3919,10 @@ void Client::cap_delay_requeue(Inode *in)
 {
   ldout(cct, 10) << __func__ << " on " << *in << dendl;
   in->hold_caps_until = ceph_clock_now();
-  in->hold_caps_until += cct->_conf->client_caps_release_delay;
 
   std::scoped_lock cl{client_lock};
+  in->hold_caps_until += cct->_conf->client_caps_release_delay;
+
   delayed_list.push_back(&in->delay_cap_item);
 }
 
@@ -3946,7 +3949,12 @@ void Client::send_cap(Inode *in, MetaSession *session, Cap *cap,
 	   << " dropping " << ccap_string(dropping)
 	   << dendl;
 
-  if (cct->_conf->client_inject_release_failure && revoking) {
+  bool client_inject_release_failure;
+  {
+    std::scoped_lock cl{client_lock};
+    client_inject_release_failure = cct->_conf->client_inject_release_failure;
+  }
+  if (client_inject_release_failure && revoking) {
     const int would_have_issued = cap->issued & retain;
     const int would_have_implemented = cap->implemented & (cap->issued | used);
     // Simulated bug:
@@ -4535,10 +4543,15 @@ void Client::_invalidate_inode_cache(Inode *in)
   ldout(cct, 10) << __func__ << " " << *in << dendl;
 
   // invalidate our userspace inode cache
-  if (cct->_conf->client_oc) {
-    objectcacher->release_set(&in->oset);
-    if (!objectcacher->set_is_empty(&in->oset))
-      lderr(cct) << "failed to invalidate cache for " << *in << dendl;
+  {
+    std::unique_lock cl{client_lock};
+    if (cct->_conf->client_oc) {
+      cl.unlock();
+      objectcacher->release_set(&in->oset);
+      if (!objectcacher->set_is_empty(&in->oset))
+        lderr(cct) << "failed to invalidate cache for " << *in << dendl;
+      cl.lock();
+    }
   }
 
   _schedule_invalidate_callback(in, 0, 0);
@@ -4551,10 +4564,15 @@ void Client::_invalidate_inode_cache(Inode *in, int64_t off, int64_t len)
   ldout(cct, 10) << __func__ << " " << *in << " " << off << "~" << len << dendl;
 
   // invalidate our userspace inode cache
-  if (cct->_conf->client_oc) {
-    vector<ObjectExtent> ls;
-    Striper::file_to_extents(cct, in->ino, &in->layout, off, len, in->truncate_size, ls);
-    objectcacher->discard_writeback(&in->oset, ls, nullptr);
+  {
+    std::unique_lock cl{client_lock};
+    if (cct->_conf->client_oc) {
+      cl.unlock();
+      vector<ObjectExtent> ls;
+      Striper::file_to_extents(cct, in->ino, &in->layout, off, len, in->truncate_size, ls);
+      objectcacher->discard_writeback(&in->oset, ls, nullptr);
+      cl.lock();
+    }
   }
 
   _schedule_invalidate_callback(in, off, len);
@@ -4895,6 +4913,8 @@ void Client::remove_session_caps(MetaSession *s, int err)
 
 int Client::_do_remount(bool retry_on_error)
 {
+  ceph_assert(ceph_mutex_is_locked_by_me(client_lock));
+
   uint64_t max_retries = cct->_conf.get_val<uint64_t>("mds_max_retries_on_remount_failure");
 
   errno = 0;
@@ -4932,6 +4952,7 @@ public:
   explicit C_Client_Remount(Client *c) : client(c) {}
   void finish(int r) override {
     ceph_assert(r == 0);
+    std::scoped_lock cl{client->client_lock};
     client->_do_remount(true);
   }
 };
@@ -6568,9 +6589,16 @@ int Client::may_delete(const char *relpath, const UserPerm& perms) {
   int r = path_walk(path, &dir, perms);
   if (r < 0)
     return r;
+
+  std::unique_lock cl{client_lock};
   if (cct->_conf->client_permissions) {
-    std::scoped_lock il(dir->inode_lock);
-    int r = may_delete(dir.get(), name.c_str(), perms);
+    cl.unlock();
+    int r;
+    {
+      std::scoped_lock il(dir->inode_lock);
+      r = may_delete(dir.get(), name.c_str(), perms);
+    }
+    cl.lock();
     if (r < 0)
       return r;
   }
@@ -7048,6 +7076,8 @@ int Client::mount(const std::string &mount_root, const UserPerm& perms,
 
 void Client::_close_sessions()
 {
+  ceph_assert(ceph_mutex_is_locked_by_me(client_lock));
+
   for (auto &p : mds_sessions) {
     if (p.second->state == MetaSession::STATE_REJECTED)
       mds_sessions.erase(p.first);
@@ -7568,8 +7598,11 @@ int Client::_do_lookup(Inode *dir, const string& name, int mask,
   path.push_dentry(name);
   req->set_filepath(path);
   req->set_inode(dir);
-  if (cct->_conf->client_debug_getattr_caps && op == CEPH_MDS_OP_LOOKUP)
+  {
+    std::scoped_lock cl{client_lock};
+    if (cct->_conf->client_debug_getattr_caps && op == CEPH_MDS_OP_LOOKUP)
       mask |= DEBUG_GETATTR_CAPS;
+  }
   req->head.args.getattr.mask = mask;
 
   ldout(cct, 10) << __func__ << " on " << path << dendl;
@@ -7663,12 +7696,16 @@ int Client::_lookup(Inode *dir, const string& dname, int mask, InodeRef *target,
     goto done;
   }
 
-  if (dname == cct->_conf->client_snapdir &&
-      dir->snapid == CEPH_NOSNAP) {
-    Inode *tmp = open_snapdir(dir);
-    std::scoped_lock cl{client_lock};
-    *target = tmp;
-    goto done;
+  {
+    std::unique_lock cl{client_lock};
+    if (dname == cct->_conf->client_snapdir &&
+        dir->snapid == CEPH_NOSNAP) {
+      cl.unlock();
+      Inode *tmp = open_snapdir(dir);
+      cl.lock();
+      *target = tmp;
+      goto done;
+    }
   }
 
 relookup:
@@ -7815,11 +7852,16 @@ int Client::path_walk(const filepath& origpath, walk_dentry_result* result, cons
     std::scoped_lock il(cur->inode_lock);
     ldout(cct, 10) << " " << i << " " << *cur << " " << dname << dendl;
     InodeRef next;
-    if (cct->_conf->client_permissions) {
-      int r = may_lookup(cur.get(), perms);
-      if (r < 0)
-	return r;
-      caps = CEPH_CAP_AUTH_SHARED;
+    {
+      std::unique_lock cl{client_lock};
+      if (cct->_conf->client_permissions) {
+        cl.unlock();
+        int r = may_lookup(cur.get(), perms);
+        cl.lock();
+        if (r < 0)
+	  return r;
+        caps = CEPH_CAP_AUTH_SHARED;
+      }
     }
 
     /* Get extra requested caps on the last component */
@@ -7915,7 +7957,12 @@ int Client::link(const char *relexisting, const char *relpath, const UserPerm& p
   if (r < 0)
     return r;
 
-  if (cct->_conf->client_permissions) {
+  bool client_permissions;
+  {
+    std::scoped_lock cl{client_lock};
+    client_permissions = cct->_conf->client_permissions;
+  }
+  if (client_permissions) {
     {
       std::scoped_lock il(in->inode_lock);
       if (S_ISDIR(in->mode)) {
@@ -7957,10 +8004,15 @@ int Client::unlink(const char *relpath, const UserPerm& perm)
     return r;
 
   std::scoped_lock il(dir->inode_lock);
-  if (cct->_conf->client_permissions) {
-    r = may_delete(dir.get(), name.c_str(), perm);
-    if (r < 0)
-      return r;
+  {
+    std::unique_lock cl{client_lock};
+    if (cct->_conf->client_permissions) {
+      cl.unlock();
+      r = may_delete(dir.get(), name.c_str(), perm);
+      cl.lock();
+      if (r < 0)
+        return r;
+    }
   }
   return _unlink(dir.get(), name.c_str(), perm);
 }
@@ -7994,7 +8046,12 @@ int Client::rename(const char *relfrom, const char *relto, const UserPerm& perm,
   if (r < 0)
     return r;
 
-  if (cct->_conf->client_permissions) {
+  bool client_permissions;
+  {
+    std::scoped_lock cl{client_lock};
+    client_permissions = cct->_conf->client_permissions;
+  }
+  if (client_permissions) {
     {
       std::scoped_lock il(fromdir->inode_lock);
       int r = may_delete(fromdir.get(), fromname.c_str(), perm);
@@ -8037,10 +8094,15 @@ int Client::mkdir(const char *relpath, mode_t mode, const UserPerm& perm, std::s
     return r;
 
   std::scoped_lock il(dir->inode_lock);
-  if (cct->_conf->client_permissions) {
-    r = may_create(dir.get(), perm);
-    if (r < 0)
-      return r;
+  {
+    std::unique_lock cl{client_lock};
+    if (cct->_conf->client_permissions) {
+      cl.unlock();
+      r = may_create(dir.get(), perm);
+      cl.lock();
+      if (r < 0)
+        return r;
+    }
   }
   return _mkdir(dir.get(), name.c_str(), mode, perm, 0, {}, std::move(alternate_name));
 }
@@ -8068,11 +8130,16 @@ int Client::mkdirs(const char *relpath, mode_t mode, const UserPerm& perms)
   }
   for (i=0; i<path.depth(); ++i) {
     std::scoped_lock il(cur->inode_lock);
-    if (cct->_conf->client_permissions) {
-      r = may_lookup(cur.get(), perms);
-      if (r < 0)
-	break;
-      caps = CEPH_CAP_AUTH_SHARED;
+    {
+      std::unique_lock cl{client_lock};
+      if (cct->_conf->client_permissions) {
+        cl.unlock();
+        r = may_lookup(cur.get(), perms);
+        cl.lock();
+        if (r < 0)
+          break;
+        caps = CEPH_CAP_AUTH_SHARED;
+      }
     }
     r = _lookup(cur.get(), path[i].c_str(), caps, &next, perms);
     if (r < 0)
@@ -8085,10 +8152,15 @@ int Client::mkdirs(const char *relpath, mode_t mode, const UserPerm& perms)
   //make new directory at each level
   for (; i<path.depth(); ++i) {
     std::scoped_lock il(cur->inode_lock);
-    if (cct->_conf->client_permissions) {
-      r = may_create(cur.get(), perms);
-      if (r < 0)
-	return r;
+    {
+      std::unique_lock cl{client_lock};
+      if (cct->_conf->client_permissions) {
+        cl.unlock();
+        r = may_create(cur.get(), perms);
+        cl.lock();
+        if (r < 0)
+	  return r;
+      }
     }
     //make new dir
     r = _mkdir(cur.get(), path[i].c_str(), mode, perms, &next);
@@ -8130,10 +8202,15 @@ int Client::rmdir(const char *relpath, const UserPerm& perms)
     return r;
 
   std::scoped_lock il(dir->inode_lock);
-  if (cct->_conf->client_permissions) {
-    int r = may_delete(dir.get(), name.c_str(), perms);
-    if (r < 0)
-      return r;
+  {
+    std::unique_lock cl{client_lock};
+    if (cct->_conf->client_permissions) {
+      cl.unlock();
+      int r = may_delete(dir.get(), name.c_str(), perms);
+      cl.lock();
+      if (r < 0)
+        return r;
+    }
   }
   return _rmdir(dir.get(), name.c_str(), perms);
 }
@@ -8162,10 +8239,15 @@ int Client::mknod(const char *relpath, mode_t mode, const UserPerm& perms, dev_t
     return r;
 
   std::scoped_lock il(dir->inode_lock);
-  if (cct->_conf->client_permissions) {
-    int r = may_create(dir.get(), perms);
-    if (r < 0)
-      return r;
+  {
+    std::unique_lock cl{client_lock};
+    if (cct->_conf->client_permissions) {
+      cl.unlock();
+      int r = may_create(dir.get(), perms);
+      cl.lock();
+      if (r < 0)
+        return r;
+    }
   }
   return _mknod(dir.get(), name.c_str(), mode, rdev, perms);
 }
@@ -8195,10 +8277,15 @@ int Client::symlink(const char *target, const char *relpath, const UserPerm& per
     return r;
 
   std::scoped_lock il(dir->inode_lock);
-  if (cct->_conf->client_permissions) {
-    int r = may_create(dir.get(), perms);
-    if (r < 0)
-      return r;
+  {
+    std::unique_lock cl{client_lock};
+    if (cct->_conf->client_permissions) {
+      cl.unlock();
+      int r = may_create(dir.get(), perms);
+      cl.lock();
+      if (r < 0)
+        return r;
+    }
   }
 
   return _symlink(dir.get(), name.c_str(), target, perms, std::move(alternate_name));
@@ -8507,10 +8594,15 @@ int Client::_setattrx(InodeRef &in, struct ceph_statx *stx, int mask,
 	   CEPH_SETATTR_CTIME | CEPH_SETATTR_BTIME);
 
   std::scoped_lock il{in->inode_lock};
-  if (cct->_conf->client_permissions) {
-    int r = may_setattr(in.get(), stx, mask, perms);
-    if (r < 0)
-      return r;
+  {
+    std::unique_lock cl{client_lock};
+    if (cct->_conf->client_permissions) {
+      cl.unlock();
+      int r = may_setattr(in.get(), stx, mask, perms);
+      cl.lock();
+      if (r < 0)
+        return r;
+    }
   }
   return __setattrx(in.get(), stx, mask, perms);
 }
@@ -8774,6 +8866,7 @@ int Client::fill_stat(Inode *in, struct stat *st, frag_info_t *dirstat, nest_inf
   stat_set_mtime_sec(st, in->mtime.sec());
   stat_set_mtime_nsec(st, in->mtime.nsec());
   if (in->is_dir()) {
+    std::scoped_lock cl{client_lock};
     if (cct->_conf->client_dirsize_rbytes)
       st->st_size = in->rstat.rbytes;
     else
@@ -8859,6 +8952,7 @@ void Client::fill_statx(Inode *in, unsigned int mask, struct ceph_statx *stx)
     in->mtime.to_timespec(&stx->stx_mtime);
 
     if (in->is_dir()) {
+      std::scoped_lock cl{client_lock};
       if (cct->_conf->client_dirsize_rbytes)
 	stx->stx_size = in->rstat.rbytes;
       else
@@ -9219,10 +9313,15 @@ int Client::opendir(const char *relpath, dir_result_t **dirpp, const UserPerm& p
   if (r < 0)
     return r;
 
-  if (cct->_conf->client_permissions) {
-    int r = may_open(in.get(), O_RDONLY, perms);
-    if (r < 0)
-      return r;
+  {
+    std::unique_lock cl{client_lock};
+    if (cct->_conf->client_permissions) {
+      cl.unlock();
+      int r = may_open(in.get(), O_RDONLY, perms);
+      cl.lock();
+      if (r < 0)
+        return r;
+    }
   }
   r = _opendir(in.get(), dirpp, perms);
   /* if ENOTDIR, dirpp will be an uninitialized point and it's very dangerous to access its value */
@@ -10044,16 +10143,26 @@ int Client::open(const char *relpath, int flags, const UserPerm& perms,
     string dname = dirpath.last_dentry();
     dirpath.pop_dentry();
     InodeRef dir;
+    bool client_permissions;
+    {
+      std::unique_lock cl{client_lock};
+      client_permissions = cct->_conf->client_permissions;
+    }
     r = path_walk(dirpath, &dir, perms, true,
-		  cct->_conf->client_permissions ? CEPH_CAP_AUTH_SHARED : 0);
+		  client_permissions ? CEPH_CAP_AUTH_SHARED : 0);
     if (r < 0)
       goto out;
 
     std::scoped_lock il{dir->inode_lock};
-    if (cct->_conf->client_permissions) {
-      r = may_create(dir.get(), perms);
-      if (r < 0)
-	goto out;
+    {
+      std::unique_lock cl{client_lock};
+      if (cct->_conf->client_permissions) {
+        cl.unlock();
+        r = may_create(dir.get(), perms);
+        cl.lock();
+        if (r < 0)
+	  goto out;
+      }
     }
     r = _create(dir.get(), dname.c_str(), flags, mode, &in, &fh, stripe_unit,
                 stripe_count, object_size, data_pool, &created, perms,
@@ -10064,8 +10173,11 @@ int Client::open(const char *relpath, int flags, const UserPerm& perms,
 
   if (!created) {
     // posix says we can only check permissions of existing files
+    std::unique_lock cl{client_lock};
     if (cct->_conf->client_permissions) {
+      cl.unlock();
       r = may_open(in.get(), flags, perms);
+      cl.lock();
       if (r < 0)
 	goto out;
     }
@@ -10244,6 +10356,7 @@ Fh *Client::_create_fh(Inode *in, int flags, int cmode, const UserPerm& perms)
 	    << ccap_string(in->caps_issued()) << dendl;
   }
 
+  std::scoped_lock cl{client_lock};
   const auto& conf = cct->_conf;
   f->readahead.set_trigger_requests(1);
   f->readahead.set_min_readahead_size(conf->client_readahead_min);
@@ -10340,8 +10453,11 @@ int Client::_open(Inode *in, int flags, mode_t mode, Fh **fhp,
 
   // use normalized flags to generate cmode
   int cflags = ceph_flags_sys2wire(flags);
-  if (cct->_conf.get_val<bool>("client_force_lazyio"))
-    cflags |= CEPH_O_LAZY;
+  {
+    std::scoped_lock cl{client_lock};
+    if (cct->_conf.get_val<bool>("client_force_lazyio"))
+      cflags |= CEPH_O_LAZY;
+  }
 
   int cmode = ceph_flags_to_mode(cflags);
   int want = ceph_caps_for_mode(cmode);
@@ -10362,10 +10478,13 @@ int Client::_open(Inode *in, int flags, mode_t mode, Fh **fhp,
     req->head.args.open.flags = cflags & ~CEPH_O_CREAT;
     req->head.args.open.mode = mode;
     req->head.args.open.pool = -1;
-    if (cct->_conf->client_debug_getattr_caps)
-      req->head.args.open.mask = DEBUG_GETATTR_CAPS;
-    else
-      req->head.args.open.mask = 0;
+    {
+      std::scoped_lock cl{client_lock};
+      if (cct->_conf->client_debug_getattr_caps)
+        req->head.args.open.mask = DEBUG_GETATTR_CAPS;
+      else
+        req->head.args.open.mask = 0;
+    }
     req->head.args.open.old_size = in->size;   // for O_TRUNC
     req->set_inode(in);
 
@@ -10449,10 +10568,13 @@ int Client::_renew_caps(Inode *in)
   req->set_filepath(path);
   req->head.args.open.flags = flags;
   req->head.args.open.pool = -1;
-  if (cct->_conf->client_debug_getattr_caps)
-    req->head.args.open.mask = DEBUG_GETATTR_CAPS;
-  else
-    req->head.args.open.mask = 0;
+  {
+    std::scoped_lock cl{client_lock};
+    if (cct->_conf->client_debug_getattr_caps)
+      req->head.args.open.mask = DEBUG_GETATTR_CAPS;
+    else
+      req->head.args.open.mask = 0;
+  }
   req->set_inode(in);
 
   // duplicate in case Cap goes away; not sure if that race is a concern?
@@ -10725,7 +10847,6 @@ int64_t Client::_read(Fh *f, int64_t offset, uint64_t size, bufferlist *bl)
   bool movepos = false;
   std::unique_ptr<C_SaferCond> onuninline;
   int64_t rc = 0;
-  const auto& conf = cct->_conf;
   Inode *in = f->inode.get();
   utime_t lat;
   utime_t start = ceph_clock_now(); 
@@ -10802,8 +10923,15 @@ retry:
     }
   }
 
-  if (!conf->client_debug_force_sync_read &&
-      conf->client_oc &&
+  bool client_oc;
+  bool client_debug_force_sync_read;
+  {
+    std::scoped_lock cl{client_lock};
+    client_debug_force_sync_read  = cct->_conf->client_debug_force_sync_read;
+    client_oc = cct->_conf->client_oc;
+  }
+  if (!client_debug_force_sync_read &&
+      client_oc &&
       (have & (CEPH_CAP_FILE_CACHE | CEPH_CAP_FILE_LAZYIO))) {
 
     if (f->flags & O_RSYNC) {
@@ -10901,7 +11029,6 @@ void Client::C_Readahead::finish(int r) {
 
 int Client::_read_async(Fh *f, uint64_t off, uint64_t len, bufferlist *bl)
 {
-  const auto& conf = cct->_conf;
   Inode *in = f->inode.get();
   ceph_assert(ceph_mutex_is_locked_by_me(in->inode_lock));
 
@@ -10916,9 +11043,13 @@ int Client::_read_async(Fh *f, uint64_t off, uint64_t len, bufferlist *bl)
     len = in->size - off;    
   }
 
-  ldout(cct, 10) << " min_bytes=" << f->readahead.get_min_readahead_size()
-                 << " max_bytes=" << f->readahead.get_max_readahead_size()
-                 << " max_periods=" << conf->client_readahead_max_periods << dendl;
+  {
+    std::scoped_lock cl{client_lock};
+    ldout(cct, 10) << " min_bytes=" << f->readahead.get_min_readahead_size()
+                   << " max_bytes=" << f->readahead.get_max_readahead_size()
+                   << " max_periods=" << cct->_conf->client_readahead_max_periods
+                   << dendl;
+  }
 
   // read (and possibly block)
   C_SaferCond onfinish("Client::_read_async flock");
@@ -11248,7 +11379,12 @@ int64_t Client::_write(Fh *f, int64_t offset, uint64_t size, const char *buf,
   std::unique_ptr<C_SaferCond> onuninline = nullptr;
   
   if (in->inline_version < CEPH_INLINE_NONE) {
-    if (endoff > cct->_conf->client_max_inline_size ||
+    uint64_t client_max_inline_size;
+    {
+      std::scoped_lock cl{client_lock};
+      client_max_inline_size = cct->_conf->client_max_inline_size;
+    }
+    if (endoff > client_max_inline_size ||
         endoff > CEPH_INLINE_MAX_SIZE ||
         !(have & CEPH_CAP_FILE_BUFFER)) {
       onuninline.reset(new C_SaferCond("Client::_write_uninline_data flock"));
@@ -11275,7 +11411,12 @@ int64_t Client::_write(Fh *f, int64_t offset, uint64_t size, const char *buf,
     }
   }
 
-  if (cct->_conf->client_oc &&
+  bool client_oc;
+  {
+    std::scoped_lock cl{client_lock};
+    client_oc = cct->_conf->client_oc;
+  }
+  if (client_oc &&
       (have & (CEPH_CAP_FILE_BUFFER | CEPH_CAP_FILE_LAZYIO))) {
     // do buffered write
     if (!in->oset.dirty_or_tx)
@@ -11485,16 +11626,18 @@ int Client::_fsync(Inode *in, bool syncdataonly)
   ldout(cct, 8) << "_fsync on " << *in << " " << (syncdataonly ? "(dataonly)":"(data+metadata)") << dendl;
 
   std::unique_lock il(in->inode_lock);
-  if (cct->_conf->client_oc) {
-    object_cacher_completion.reset(new C_SaferCond("Client::_fsync::lock"));
-    {
-      std::scoped_lock cl(client_lock);
+  {
+    std::unique_lock cl{client_lock};
+    if (cct->_conf->client_oc) {
       tmp_ref = in; // take a reference; C_SaferCond doesn't and _flush won't either
+      cl.unlock();
+      object_cacher_completion.reset(new C_SaferCond("Client::_fsync::lock"));
+      _flush(in, object_cacher_completion.get());
+      cl.lock();
+      ldout(cct, 15) << "using return-valued form of _fsync" << dendl;
     }
-    _flush(in, object_cacher_completion.get());
-    ldout(cct, 15) << "using return-valued form of _fsync" << dendl;
   }
-  
+
   if (!syncdataonly && in->dirty_caps) {
     check_caps(in, CHECK_CAPS_NODELAY|CHECK_CAPS_SYNCHRONOUS);
 
@@ -12237,6 +12380,7 @@ int Client::test_dentry_handling(bool can_invalidate)
   if (!iref_reader.is_state_satisfied())
     return -CEPHFS_ENOTCONN;
 
+  std::scoped_lock cl{client_lock};
   can_invalidate_dentries = can_invalidate;
 
   if (can_invalidate_dentries) {
@@ -12404,11 +12548,16 @@ int Client::mksnap(const char *relpath, const char *name, const UserPerm& perm,
   if (r < 0)
     return r;
 
-  if (cct->_conf->client_permissions) {
-    std::scoped_lock il{in->inode_lock};
-    r = may_create(in.get(), perm);
-    if (r < 0)
-      return r;
+  {
+    std::unique_lock cl{client_lock};
+    if (cct->_conf->client_permissions) {
+      cl.unlock();
+      std::scoped_lock il{in->inode_lock};
+      r = may_create(in.get(), perm);
+      cl.lock();
+      if (r < 0)
+        return r;
+    }
   }
 
   Inode *snapdir;
@@ -12439,10 +12588,15 @@ int Client::rmsnap(const char *relpath, const char *name, const UserPerm& perms,
   }
 
   std::scoped_lock sil{snapdir->inode_lock};
-  if (cct->_conf->client_permissions) {
-    r = may_delete(snapdir, check_perms ? name : NULL, perms);
-    if (r < 0)
-      return r;
+  {
+    std::unique_lock cl{client_lock};
+    if (cct->_conf->client_permissions) {
+      cl.unlock();
+      r = may_delete(snapdir, check_perms ? name : NULL, perms);
+      cl.lock();
+      if (r < 0)
+        return r;
+    }
   }
   return _rmdir(snapdir, name, perms);
 }
@@ -13275,10 +13429,15 @@ int Client::_getxattr(Inode *in, const char *name, void *value, size_t size,
 int Client::_getxattr(InodeRef &in, const char *name, void *value, size_t size,
 		      const UserPerm& perms)
 {
-  if (cct->_conf->client_permissions) {
-    int r = xattr_permission(in.get(), name, MAY_READ, perms);
-    if (r < 0)
-      return r;
+  {
+    std::unique_lock cl{client_lock};
+    if (cct->_conf->client_permissions) {
+      cl.unlock();
+      int r = xattr_permission(in.get(), name, MAY_READ, perms);
+      cl.lock();
+      if (r < 0)
+        return r;
+    }
   }
   return _getxattr(in.get(), name, value, size, perms);
 }
@@ -13485,10 +13644,15 @@ int Client::_setxattr(Inode *in, const char *name, const void *value,
 int Client::_setxattr(InodeRef &in, const char *name, const void *value,
 		      size_t size, int flags, const UserPerm& perms)
 {
-  if (cct->_conf->client_permissions) {
-    int r = xattr_permission(in.get(), name, MAY_WRITE, perms);
-    if (r < 0)
-      return r;
+  {
+    std::unique_lock cl{client_lock};
+    if (cct->_conf->client_permissions) {
+      cl.unlock();
+      int r = xattr_permission(in.get(), name, MAY_WRITE, perms);
+      cl.lock();
+      if (r < 0)
+        return r;
+    }
   }
   return _setxattr(in.get(), name, value, size, flags, perms);
 }
@@ -13624,10 +13788,15 @@ int Client::_removexattr(Inode *in, const char *name, const UserPerm& perms)
 
 int Client::_removexattr(InodeRef &in, const char *name, const UserPerm& perms)
 {
-  if (cct->_conf->client_permissions) {
-    int r = xattr_permission(in.get(), name, MAY_WRITE, perms);
-    if (r < 0)
-      return r;
+  {
+    std::unique_lock cl{client_lock};
+    if (cct->_conf->client_permissions) {
+      cl.unlock();
+      int r = xattr_permission(in.get(), name, MAY_WRITE, perms);
+      cl.lock();
+      if (r < 0)
+        return r;
+    }
   }
 
   return _removexattr(in.get(), name, perms);
@@ -14154,8 +14323,11 @@ int Client::_create(Inode *dir, const char *name, int flags, mode_t mode,
 
   // use normalized flags to generate cmode
   int cflags = ceph_flags_sys2wire(flags);
-  if (cct->_conf.get_val<bool>("client_force_lazyio"))
-    cflags |= CEPH_O_LAZY;
+  {
+    std::scoped_lock cl{client_lock};
+    if (cct->_conf.get_val<bool>("client_force_lazyio"))
+      cflags |= CEPH_O_LAZY;
+  }
 
   int cmode = ceph_flags_to_mode(cflags);
 
@@ -14183,10 +14355,13 @@ int Client::_create(Inode *dir, const char *name, int flags, mode_t mode,
   req->head.args.open.stripe_unit = stripe_unit;
   req->head.args.open.stripe_count = stripe_count;
   req->head.args.open.object_size = object_size;
-  if (cct->_conf->client_debug_getattr_caps)
-    req->head.args.open.mask = DEBUG_GETATTR_CAPS;
-  else
-    req->head.args.open.mask = 0;
+  {
+    std::scoped_lock cl{client_lock};
+    if (cct->_conf->client_debug_getattr_caps)
+      req->head.args.open.mask = DEBUG_GETATTR_CAPS;
+    else
+      req->head.args.open.mask = 0;
+  }
   req->head.args.open.pool = pool_id;
   req->dentry_drop = CEPH_CAP_FILE_SHARED;
   req->dentry_unless = CEPH_CAP_FILE_EXCL;
@@ -16256,32 +16431,35 @@ int Client::check_pool_perm(Inode *in, int need)
 {
   ceph_assert(ceph_mutex_is_locked_by_me(in->inode_lock));
 
-  if (!cct->_conf->client_check_pool_perm)
-    return 0;
+  {
+    std::scoped_lock cl{client_lock};
+    if (!cct->_conf->client_check_pool_perm)
+      return 0;
+  }
 
   int64_t pool_id = in->layout.pool_id;
   std::string pool_ns = in->layout.pool_ns;
   std::pair<int64_t, std::string> perm_key(pool_id, pool_ns);
   int have = 0;
 
-  std::unique_lock cl{client_lock};
-  while (true) {
-    auto it = pool_perms.find(perm_key);
-    if (it == pool_perms.end())
-      break;
-    if (it->second == POOL_CHECKING) {
-      // avoid concurrent checkings
-      in->inode_lock.unlock();
-      wait_on_list(waiting_for_pool_perm);
-      cl.unlock();
-      in->inode_lock.lock();
-      cl.lock();
-    } else {
-      have = it->second;
-      ceph_assert(have & POOL_CHECKED);
-      break;
+  in->inode_lock.unlock();
+  {
+    std::scoped_lock cl{client_lock};
+    while (true) {
+      auto it = pool_perms.find(perm_key);
+      if (it == pool_perms.end())
+        break;
+      if (it->second == POOL_CHECKING) {
+        // avoid concurrent checkings
+        wait_on_list(waiting_for_pool_perm);
+      } else {
+        have = it->second;
+        ceph_assert(have & POOL_CHECKED);
+        break;
+      }
     }
   }
+  in->inode_lock.lock();
 
   if (!have) {
     if (in->snapid != CEPH_NOSNAP) {
@@ -16291,7 +16469,10 @@ int Client::check_pool_perm(Inode *in, int need)
       return 0;
     }
 
-    pool_perms[perm_key] = POOL_CHECKING;
+    {
+      std::scoped_lock cl{client_lock};
+      pool_perms[perm_key] = POOL_CHECKING;
+    }
 
     char oid_buf[32];
     snprintf(oid_buf, sizeof(oid_buf), "%llx.00000000", (unsigned long long)in->ino);
@@ -16313,12 +16494,10 @@ int Client::check_pool_perm(Inode *in, int need)
     objecter->mutate(oid, OSDMap::file_to_object_locator(in->layout), wr_op,
 		     nullsnapc, ceph::real_clock::now(), 0, &wr_cond);
 
-    cl.unlock();
     in->inode_lock.unlock();
     int rd_ret = rd_cond.wait();
     int wr_ret = wr_cond.wait();
     in->inode_lock.lock();
-    cl.lock();
 
     bool errored = false;
 
@@ -16342,11 +16521,13 @@ int Client::check_pool_perm(Inode *in, int need)
       // Indeterminate: erase CHECKING state so that subsequent calls re-check.
       // Raise EIO because actual error code might be misleading for
       // userspace filesystem user.
+      std::scoped_lock cl{client_lock};
       pool_perms.erase(perm_key);
       signal_cond_list(waiting_for_pool_perm);
       return -CEPHFS_EIO;
     }
 
+    std::scoped_lock cl{client_lock};
     pool_perms[perm_key] = have | POOL_CHECKED;
     signal_cond_list(waiting_for_pool_perm);
   }
@@ -16476,7 +16657,7 @@ void Client::set_uuid(const std::string& uuid)
   RWRef_t iref_reader(initialize_state, CLIENT_INITIALIZED);
   ceph_assert(iref_reader.is_state_satisfied());
 
-  std::scoped_lock l(client_lock);
+  std::scoped_lock cl(client_lock);
   assert(!uuid.empty());
 
   metadata["uuid"] = uuid;
@@ -16489,7 +16670,7 @@ void Client::set_session_timeout(unsigned timeout)
   RWRef_t iref_reader(initialize_state, CLIENT_INITIALIZED);
   ceph_assert(iref_reader.is_state_satisfied());
 
-  std::scoped_lock l(client_lock);
+  std::scoped_lock cl(client_lock);
 
   metadata["timeout"] = stringify(timeout);
 }
@@ -16597,6 +16778,7 @@ int Client::start_reclaim(const std::string& uuid, unsigned flags,
 
 void Client::finish_reclaim()
 {
+  std::scoped_lock cl(client_lock);
   auto it = metadata.find("reclaiming_uuid");
   if (it == metadata.end()) {
     for (auto &p : mds_sessions)
@@ -16675,8 +16857,8 @@ const char** Client::get_tracked_conf_keys() const
 void Client::handle_conf_change(const ConfigProxy& conf,
 				const std::set <std::string> &changed)
 {
+  std::scoped_lock cl(client_lock);
   if (changed.count("client_cache_mid")) {
-    std::scoped_lock cl(client_lock);
     lru.lru_set_midpoint(cct->_conf->client_cache_mid);
   }
   if (changed.count("client_acl_type")) {
