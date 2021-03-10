@@ -703,6 +703,7 @@ void Client::shutdown()
 
 void Client::trim_cache(bool trim_kernel_dcache)
 {
+  ldout(cct, 0) << "lxb---- " << __func__ << ":" << __LINE__ << dendl;
   ceph_assert(ceph_mutex_is_locked_by_me(client_lock));
 
   uint64_t max = cct->_conf->client_cache_size;
@@ -938,6 +939,7 @@ Inode * Client::add_update_inode(InodeStat *st, utime_t from,
 				 MetaSession *session,
 				 const UserPerm& request_perms)
 {
+  ldout(cct, 0) << "lxb---- " << __func__ << ":" << __LINE__ << dendl;
   ceph_assert(ceph_mutex_is_locked_by_me(client_lock));
 
   InodeRef in = NULL;
@@ -1061,8 +1063,10 @@ Inode * Client::add_update_inode(InodeStat *st, utime_t from,
   if (was_new)
     ldout(cct, 12) << __func__ << " adding " << *in << " caps " << ccap_string(st->cap.caps) << dendl;
 
-  if (!st->cap.caps)
+  if (!st->cap.caps) {
+    client_lock.lock();
     return in.get();   // as with readdir returning indoes in different snaprealms (no caps!)
+  }
 
   if (in->snapid == CEPH_NOSNAP) {
     add_update_cap(in.get(), session, st->cap.cap_id, st->cap.caps, st->cap.wanted,
@@ -1195,6 +1199,7 @@ Dentry *Client::insert_dentry_inode(Dir *dir, const string& dname, LeaseStat *dl
 
 void Client::update_dentry_lease(Dentry *dn, LeaseStat *dlease, utime_t from, MetaSession *session)
 {
+  ldout(cct, 0) << "lxb---- " << __func__ << ":" << __LINE__ << dendl;
   ceph_assert(dn);
   ceph_assert(ceph_mutex_is_locked_by_me(dn->dir->parent_inode->inode_lock));
 
@@ -1455,6 +1460,7 @@ void Client::insert_readdir_results(MetaRequest *request, MetaSession *session, 
  */
 Inode* Client::insert_trace(MetaRequest *request, MetaSession *session)
 {
+  ldout(cct, 0) << "lxb---- " << __func__ << ":" << __LINE__ << dendl;
   ceph_assert(ceph_mutex_is_locked_by_me(client_lock));
 
   auto& reply = request->reply;
@@ -2094,6 +2100,7 @@ int Client::make_request(MetaRequestRef &request,
 
 void Client::unregister_request(MetaRequestRef &req)
 {
+  ldout(cct, 0) << "lxb---- " << __func__ << ":" << __LINE__ << dendl;
   ceph_assert(ceph_mutex_is_locked_by_me(client_lock));
 
   mds_requests.erase(req->tid);
@@ -2445,6 +2452,7 @@ void Client::_closed_mds_session(MetaSession *s, int err, bool rejected)
 
 void Client::handle_client_session(const MConstRef<MClientSession>& m)
 {
+  ldout(cct, 0) << "lxb---- " << __func__ << ":" << __LINE__ << dendl;
   mds_rank_t from = mds_rank_t(m->get_source().num());
   ldout(cct, 10) << __func__ << " " << *m << " from mds." << from << dendl;
 
@@ -2681,6 +2689,7 @@ ref_t<MClientRequest> Client::build_client_request(MetaRequest *request)
 
 void Client::handle_client_request_forward(const MConstRef<MClientRequestForward>& fwd)
 {
+  ldout(cct, 0) << "lxb---- " << __func__ << ":" << __LINE__ << dendl;
   mds_rank_t mds = mds_rank_t(fwd->get_source().num());
 
   std::scoped_lock cl(client_lock);
@@ -2729,6 +2738,7 @@ bool Client::is_dir_operation(MetaRequest *req)
 
 void Client::handle_client_reply(const MConstRef<MClientReply>& reply)
 {
+  ldout(cct, 0) << "lxb---- " << __func__ << ":" << __LINE__ << dendl;
   mds_rank_t mds_num = mds_rank_t(reply->get_source().num());
 
   std::unique_lock cl(client_lock);
@@ -2893,6 +2903,7 @@ void Client::_handle_full_flag(int64_t pool)
 
 void Client::handle_osd_map(const MConstRef<MOSDMap>& m)
 {
+  ldout(cct, 0) << "lxb---- " << __func__ << ":" << __LINE__ << dendl;
   std::set<entity_addr_t> new_blocklists;
 
   std::scoped_lock cl(client_lock);
@@ -2992,6 +3003,7 @@ bool Client::ms_dispatch2(const MessageRef &m)
     return true;
   }
 
+  ldout(cct, 0) << "lxb---- " << __func__ << ":" << __LINE__ << dendl;
   switch (m->get_type()) {
     // mounting and mds sessions
   case CEPH_MSG_MDS_MAP:
@@ -3069,6 +3081,7 @@ bool Client::ms_dispatch2(const MessageRef &m)
 
 void Client::handle_fs_map(const MConstRef<MFSMap>& m)
 {
+  ldout(cct, 0) << "lxb---- " << __func__ << ":" << __LINE__ << dendl;
   std::scoped_lock cl(client_lock);
   fsmap.reset(new FSMap(m->get_fsmap()));
 
@@ -3079,6 +3092,7 @@ void Client::handle_fs_map(const MConstRef<MFSMap>& m)
 
 void Client::handle_fs_map_user(const MConstRef<MFSMapUser>& m)
 {
+  ldout(cct, 0) << "lxb---- " << __func__ << ":" << __LINE__ << dendl;
   std::scoped_lock cl(client_lock);
   fsmap_user.reset(new FSMapUser);
   *fsmap_user = m->get_fsmap();
@@ -3121,6 +3135,7 @@ void Client::cancel_commands(const MDSMap& newmap)
 
 void Client::handle_mds_map(const MConstRef<MMDSMap>& m)
 {
+  ldout(cct, 0) << "lxb---- " << __func__ << ":" << __LINE__ << dendl;
   std::unique_lock cl(client_lock);
   if (m->get_epoch() <= mdsmap->get_epoch()) {
     ldout(cct, 1) << __func__ << " epoch " << m->get_epoch()
@@ -3444,6 +3459,7 @@ void Client::got_mds_push(MetaSession *s)
 
 void Client::handle_lease(const MConstRef<MClientLease>& m)
 {
+  ldout(cct, 0) << "lxb---- " << __func__ << ":" << __LINE__ << dendl;
   ldout(cct, 10) << __func__ << " " << *m << dendl;
 
   ceph_assert(m->get_action() == CEPH_MDS_LEASE_REVOKE);
@@ -5632,6 +5648,7 @@ void Client::update_snap_trace(const bufferlist& bl, SnapRealm **realm_ret, bool
 
 void Client::handle_snap(const MConstRef<MClientSnap>& m)
 {
+  ldout(cct, 0) << "lxb---- " << __func__ << ":" << __LINE__ << dendl;
   ldout(cct, 10) << __func__ << " " << *m << dendl;
   mds_rank_t mds = mds_rank_t(m->get_source().num());
 
@@ -5714,6 +5731,7 @@ void Client::handle_snap(const MConstRef<MClientSnap>& m)
 
 void Client::handle_quota(const MConstRef<MClientQuota>& m)
 {
+  ldout(cct, 0) << "lxb---- " << __func__ << ":" << __LINE__ << dendl;
   mds_rank_t mds = mds_rank_t(m->get_source().num());
 
   std::unique_lock cl(client_lock);
@@ -5740,6 +5758,7 @@ void Client::handle_quota(const MConstRef<MClientQuota>& m)
 
 void Client::handle_caps(const MConstRef<MClientCaps>& m)
 {
+  ldout(cct, 0) << "lxb---- " << __func__ << ":" << __LINE__ << dendl;
   mds_rank_t mds = mds_rank_t(m->get_source().num());
 
   std::unique_lock cl(client_lock);
@@ -6851,6 +6870,7 @@ int Client::mds_command(
 
 void Client::handle_command_reply(const MConstRef<MCommandReply>& m)
 {
+  ldout(cct, 0) << "lxb---- " << __func__ << ":" << __LINE__ << dendl;
   ceph_tid_t const tid = m->get_tid();
 
   ldout(cct, 10) << __func__ << ": tid=" << m->get_tid() << dendl;
@@ -16596,6 +16616,7 @@ void Client::finish_reclaim()
 
 void Client::handle_client_reclaim_reply(const MConstRef<MClientReclaimReply>& reply)
 {
+  ldout(cct, 0) << "lxb---- " << __func__ << ":" << __LINE__ << dendl;
   mds_rank_t from = mds_rank_t(reply->get_source().num());
   ldout(cct, 10) << __func__ << " " << *reply << " from mds." << from << dendl;
 
