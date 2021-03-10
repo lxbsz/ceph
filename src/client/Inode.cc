@@ -12,6 +12,11 @@
 
 #include "mds/flock.h"
 
+void Cap::touch() {
+  // move to back of LRU
+  session->caps.push_back(&cap_item);
+}
+
 Inode::~Inode()
 {
   delay_cap_item.remove_myself();
@@ -57,7 +62,7 @@ ostream& operator<<(ostream &out, const Inode &in)
     for (const auto &pair : in.caps) {
       if (!first)
         out << ',';
-      out << pair.first << '=' << ccap_string(pair.second.issued);
+      out << pair.first << '=' << ccap_string(pair.second->issued);
       first = false;
     }
     out << ")";
@@ -197,14 +202,14 @@ bool Inode::is_any_caps()
   return !caps.empty() || snap_caps;
 }
 
-bool Inode::cap_is_valid(const Cap &cap) const
+bool Inode::cap_is_valid(const Cap *cap) const
 {
   /*cout << "cap_gen     " << cap->session-> cap_gen << std::endl
     << "session gen " << cap->gen << std::endl
     << "cap expire  " << cap->session->cap_ttl << std::endl
     << "cur time    " << ceph_clock_now(cct) << std::endl;*/
-  if ((cap.session->cap_gen <= cap.gen)
-      && (ceph_clock_now() < cap.session->cap_ttl)) {
+  if ((cap->session->cap_gen <= cap->gen)
+      && (ceph_clock_now() < cap->session->cap_ttl)) {
     return true;
   }
   return false;
@@ -216,8 +221,8 @@ int Inode::caps_issued(int *implemented) const
   int i = 0;
   for (const auto &[mds, cap] : caps) {
     if (cap_is_valid(cap)) {
-      c |= cap.issued;
-      i |= cap.implemented;
+      c |= cap->issued;
+      i |= cap->implemented;
     }
   }
   // exclude caps issued by non-auth MDS, but are been revoking by
@@ -235,7 +240,7 @@ void Inode::try_touch_cap(mds_rank_t mds)
 {
   auto it = caps.find(mds);
   if (it != caps.end()) {
-    it->second.touch();
+    it->second->touch();
   }
 }
 
@@ -265,7 +270,7 @@ bool Inode::caps_issued_mask(unsigned mask, bool allow_impl)
     return true;
   // prefer auth cap
   if (auth_cap &&
-      cap_is_valid(*auth_cap) &&
+      cap_is_valid(auth_cap.get()) &&
       (auth_cap->issued & mask) == mask) {
     auth_cap->touch();
     client->cap_hit();
@@ -273,15 +278,15 @@ bool Inode::caps_issued_mask(unsigned mask, bool allow_impl)
   }
   // try any cap
   for (auto &pair : caps) {
-    Cap &cap = pair.second;
+    Cap *cap = pair.second;
     if (cap_is_valid(cap)) {
-      if ((cap.issued & mask) == mask) {
-        cap.touch();
+      if ((cap->issued & mask) == mask) {
+        cap->touch();
 	client->cap_hit();
 	return true;
       }
-      c |= cap.issued;
-      i |= cap.implemented;
+      c |= cap->issued;
+      i |= cap->implemented;
     }
   }
 
@@ -291,7 +296,7 @@ bool Inode::caps_issued_mask(unsigned mask, bool allow_impl)
   if ((c & mask) == mask) {
     // bah.. touch them all
     for (auto &pair : caps) {
-      pair.second.touch();
+      pair.second->touch();
     }
     client->cap_hit();
     return true;
@@ -331,7 +336,7 @@ int Inode::caps_mds_wanted()
 {
   int want = 0;
   for (const auto &pair : caps) {
-    want |= pair.second.wanted;
+    want |= pair.second->wanted;
   }
   return want;
 }
@@ -345,7 +350,7 @@ const UserPerm* Inode::get_best_perms()
 {
   const UserPerm *perms = NULL;
   for (const auto &pair : caps) {
-    const UserPerm& iperm = pair.second.latest_perms;
+    const UserPerm& iperm = pair.second->latest_perms;
     if (!perms) { // we don't have any, take what's present
       perms = &iperm;
     } else if (iperm.uid() == uid) {
@@ -470,9 +475,9 @@ void Inode::dump(Formatter *f) const
   for (const auto &pair : caps) {
     f->open_object_section("cap");
     f->dump_int("mds", pair.first);
-    if (&pair.second == auth_cap)
+    if (pair.second == auth_cap)
       f->dump_int("auth", 1);
-    pair.second.dump(f);
+    pair.second->dump(f);
     f->close_section();
   }
   f->close_section();
@@ -789,4 +794,12 @@ void Inode::mark_caps_clean()
   dirty_cap_item.remove_myself();
 }
 
+void intrusive_ptr_add_ref(Cap *cap)
+{
+  cap->get();
+}
 
+void intrusive_ptr_release(Cap *cap)
+{
+  cap->put();
+}
