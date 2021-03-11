@@ -624,14 +624,17 @@ void Client::shutdown()
   // If we were not mounted, but were being used for sending
   // MDS commands, we may have sessions that need closing.
   {
-    std::scoped_lock cl{client_lock};
+    std::unique_lock cl{client_lock};
 
     // To make sure the tick thread will be stoppped before
     // destructing the Client, just in case like the _mount()
     // failed but didn't not get a chance to stop the tick
     // thread
-    tick_thread_stopped = true;
+    tick_thread_stop = true;
     upkeep_cond.notify_one();
+    upkeep_cond.wait(cl, [this] {
+      return tick_thread_stopped;
+    });
 
     _close_sessions();
 
@@ -7279,8 +7282,11 @@ void Client::_unmount(bool abort)
   }
 
   // stop the tick thread
-  tick_thread_stopped = true;
+  tick_thread_stop = true;
   upkeep_cond.notify_one();
+  upkeep_cond.wait(cl, [this] {
+    return tick_thread_stopped;
+  });
 
   _close_sessions();
 
@@ -7422,7 +7428,7 @@ void Client::start_tick_thread()
     auto last_tick = time::min();
 
     std::unique_lock cl(client_lock);
-    while (!tick_thread_stopped) {
+    while (!tick_thread_stop) {
       auto now = clock::now();
       auto since = now - last_tick;
 
@@ -7438,9 +7444,11 @@ void Client::start_tick_thread()
       }
 
       ldout(cct, 20) << "upkeep thread waiting interval " << interval << dendl;
-      if (!tick_thread_stopped)
+      if (!tick_thread_stop)
         upkeep_cond.wait_for(cl, interval);
     }
+    tick_thread_stopped = true;
+    upkeep_cond.notify_one();
   });
 }
 

@@ -854,6 +854,7 @@ public:
   /* tick thread */
   std::thread upkeeper;
   ceph::condition_variable upkeep_cond;
+  bool tick_thread_stop = false;
   bool tick_thread_stopped = false;
 
   std::unique_ptr<PerfCounters> logger;
