@@ -69,10 +69,10 @@ public:
     : default_perms(),
       mounted(false),
       inited(false),
+      cct(cct_)
       client(nullptr),
       monclient(nullptr),
       messenger(nullptr),
-      cct(cct_)
   {
     if (cct_) {
       cct->get();
@@ -329,10 +329,10 @@ public:
 private:
   bool mounted;
   bool inited;
+  CephContext *cct;
   StandaloneClient *client;
   MonClient *monclient;
   Messenger *messenger;
-  CephContext *cct;
   std::string cwd;
   std::string fs_name;
 };
