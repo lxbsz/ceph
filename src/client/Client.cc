@@ -2906,7 +2906,6 @@ void Client::handle_osd_map(const MConstRef<MOSDMap>& m)
 {
   std::set<entity_addr_t> new_blocklists;
 
-  std::scoped_lock cl(client_lock);
   objecter->consume_blocklist_events(&new_blocklists);
 
   const auto myaddrs = messenger->get_myaddrs();
@@ -2915,6 +2914,8 @@ void Client::handle_osd_map(const MConstRef<MOSDMap>& m)
     [&](const OSDMap& o) {
       return o.require_osd_release < ceph_release_t::nautilus;
     });
+
+  std::scoped_lock cl(client_lock);
   if (!blocklisted) {
     for (auto a : myaddrs.v) {
       // blocklist entries are always TYPE_ANY for nautilus+
@@ -10513,6 +10514,7 @@ loff_t Client::lseek(int fd, loff_t offset, int whence)
   if (f->flags & O_PATH)
     return -CEPHFS_EBADF;
 #endif
+  std::scoped_lock il(f->inode->inode_lock);
   return _lseek(f.get(), offset, whence);
 }
 
@@ -10542,7 +10544,6 @@ loff_t Client::_lseek(Fh *f, loff_t offset, int whence)
 #endif
   }
 
-  std::scoped_lock il{in->inode_lock};
   if (whence_check) {
     int r = _getattr(in, CEPH_STAT_CAP_SIZE, f->actor_perms);
     if (r < 0)
@@ -11002,13 +11003,10 @@ int Client::_read_sync(Fh *f, uint64_t off, uint64_t len, bufferlist *bl,
     bufferlist tbl;
 
     int wanted = left;
-    {
-      std::scoped_lock cl{client_lock};
-      filer->read_trunc(in->ino, &in->layout, in->snapid,
-                        pos, left, &tbl, 0,
-                        in->truncate_size, in->truncate_seq,
-                        &onfinish);
-    }
+    filer->read_trunc(in->ino, &in->layout, in->snapid,
+                      pos, left, &tbl, 0,
+                      in->truncate_size, in->truncate_seq,
+                      &onfinish);
     in->inode_lock.unlock();
     int r = wait_and_copy(onfinish, tbl, wanted);
     in->inode_lock.lock();
@@ -11288,13 +11286,10 @@ int64_t Client::_write(Fh *f, int64_t offset, uint64_t size, const char *buf,
     C_SaferCond onfinish("Client::_write flock");
     get_cap_ref(in, CEPH_CAP_FILE_BUFFER);
 
-    {
-      std::scoped_lock cl{client_lock};
-      filer->write_trunc(in->ino, &in->layout, in->snaprealm->get_snap_context(),
-                         offset, size, bl, ceph::real_clock::now(), 0,
-                         in->truncate_size, in->truncate_seq,
-                         &onfinish);
-    }
+    filer->write_trunc(in->ino, &in->layout, in->snaprealm->get_snap_context(),
+                       offset, size, bl, ceph::real_clock::now(), 0,
+                       in->truncate_size, in->truncate_seq,
+                       &onfinish);
     il.unlock();
     r = onfinish.wait();
     il.lock();
@@ -13502,8 +13497,6 @@ int Client::_setxattr_check_data_pool(string& name, string& value, const OSDMap 
 
 void Client::_setxattr_maybe_wait_for_osdmap(const char *name, const void *value, size_t size)
 {
-  std::scoped_lock cl{client_lock};
-
   // For setting pool of layout, MetaRequest need osdmap epoch.
   // There is a race which create a new data pool but client and mds both don't have.
   // Make client got the latest osdmap which make mds quickly judge whether get newer osdmap.
@@ -14128,7 +14121,6 @@ int Client::_create(Inode *dir, const char *name, int flags, mode_t mode,
 
   int64_t pool_id = -1;
   if (data_pool && *data_pool) {
-    std::scoped_lock cl(client_lock);
     pool_id = objecter->with_osdmap(
       std::mem_fn(&OSDMap::lookup_pg_pool_name), data_pool);
     if (pool_id < 0)
@@ -14918,14 +14910,11 @@ int Client::ll_link(Inode *in, Inode *newparent, const char *newname,
 
 int Client::ll_num_osds(void)
 {
-  std::scoped_lock lock(client_lock);
   return objecter->with_osdmap(std::mem_fn(&OSDMap::get_num_osds));
 }
 
 int Client::ll_osdaddr(int osd, uint32_t *addr)
 {
-  std::scoped_lock lock(client_lock);
-
   entity_addr_t g;
   bool exists = objecter->with_osdmap([&](const OSDMap& o) {
       if (!o.exists(osd))
@@ -14987,8 +14976,6 @@ int Client::ll_get_stripe_osd(Inode *in, uint64_t blockno,
   }
   uint64_t objectsetno = stripeno / stripes_per_object;       // which object set
   uint64_t objectno = objectsetno * stripe_count + stripepos;  // object id
-
-  std::scoped_lock cl(client_lock);
 
   object_t oid = file_object_t(ino, objectno);
   return objecter->with_osdmap([&](const OSDMap& o) {
@@ -15263,6 +15250,7 @@ loff_t Client::ll_lseek(Fh *fh, loff_t offset, int whence)
   tout(cct) << offset << std::endl;
   tout(cct) << whence << std::endl;
 
+  std::scoped_lock il(fh->inode->inode_lock);
   return _lseek(fh, offset, whence);
 }
 
@@ -15564,14 +15552,11 @@ int Client::_fallocate(Fh *fh, int mode, int64_t offset, int64_t length)
       get_cap_ref(in, CEPH_CAP_FILE_BUFFER);
 
       _invalidate_inode_cache(in, offset, length);
-      {
-        std::scoped_lock cl(client_lock);
-        filer->zero(in->ino, &in->layout,
-                    in->snaprealm->get_snap_context(),
-                    offset, length,
-                    ceph::real_clock::now(),
-                    0, true, &onfinish);
-      }
+      filer->zero(in->ino, &in->layout,
+                  in->snaprealm->get_snap_context(),
+                  offset, length,
+                  ceph::real_clock::now(),
+                  0, true, &onfinish);
       in->mtime = in->ctime = ceph_clock_now();
       in->change_attr++;
       in->mark_caps_dirty(CEPH_CAP_FILE_WR);
@@ -15842,8 +15827,6 @@ int64_t Client::get_pool_id(const char *pool_name)
   if (!mref_reader.is_state_satisfied())
     return -CEPHFS_ENOTCONN;
 
-  std::scoped_lock cl(client_lock);
-
   return objecter->with_osdmap(std::mem_fn(&OSDMap::lookup_pg_pool_name),
 			       pool_name);
 }
@@ -15853,8 +15836,6 @@ string Client::get_pool_name(int64_t pool)
   RWRef_t mref_reader(mount_state, CLIENT_MOUNTING);
   if (!mref_reader.is_state_satisfied())
     return string();
-
-  std::scoped_lock cl(client_lock);
 
   return objecter->with_osdmap([pool](const OSDMap& o) {
       return o.have_pg_pool(pool) ? o.get_pool_name(pool) : string();
@@ -15866,8 +15847,6 @@ int Client::get_pool_replication(int64_t pool)
   RWRef_t mref_reader(mount_state, CLIENT_MOUNTING);
   if (!mref_reader.is_state_satisfied())
     return -CEPHFS_ENOTCONN;
-
-  std::scoped_lock cl(client_lock);
 
   return objecter->with_osdmap([pool](const OSDMap& o) {
       return o.have_pg_pool(pool) ? o.get_pg_pool(pool)->get_size() : -CEPHFS_ENOENT;
@@ -15891,16 +15870,13 @@ int Client::get_file_extent_osds(int fd, loff_t off, loff_t *len, vector<int>& o
   Striper::file_to_extents(cct, in->ino, &in->layout, off, 1, in->truncate_size, extents);
   ceph_assert(extents.size() == 1);
 
-  {
-    std::scoped_lock cl(client_lock);
-    objecter->with_osdmap([&](const OSDMap& o) {
-        pg_t pg = o.object_locator_to_pg(extents[0].oid, extents[0].oloc);
-        o.pg_to_acting_osds(pg, osds);
-      });
+  objecter->with_osdmap([&](const OSDMap& o) {
+      pg_t pg = o.object_locator_to_pg(extents[0].oid, extents[0].oloc);
+      o.pg_to_acting_osds(pg, osds);
+    });
 
-    if (osds.empty())
-      return -CEPHFS_EINVAL;
-  }
+  if (osds.empty())
+    return -CEPHFS_EINVAL;
 
   /*
    * Return the remainder of the extent (stripe unit)
@@ -15929,8 +15905,6 @@ int Client::get_osd_crush_location(int id, vector<pair<string, string> >& path)
   RWRef_t mref_reader(mount_state, CLIENT_MOUNTING);
   if (!mref_reader.is_state_satisfied())
     return -CEPHFS_ENOTCONN;
-
-  std::scoped_lock cl(client_lock);
 
   if (id < 0)
     return -CEPHFS_EINVAL;
@@ -15980,8 +15954,6 @@ int Client::get_osd_addr(int osd, entity_addr_t& addr)
   if (!mref_reader.is_state_satisfied())
     return -CEPHFS_ENOTCONN;
 
-  std::scoped_lock cl(client_lock);
-
   return objecter->with_osdmap([&](const OSDMap& o) {
       if (!o.exists(osd))
 	return -CEPHFS_ENOENT;
@@ -16021,7 +15993,6 @@ int Client::get_local_osd()
     return -CEPHFS_ENOTCONN;
 
   std::scoped_lock cl(client_lock);
-
   objecter->with_osdmap([this](const OSDMap& o) {
       if (o.get_epoch() != local_osd_epoch) {
 	local_osd = o.find_osd_on_ip(messenger->get_myaddrs().front());
@@ -16423,7 +16394,6 @@ out:
 
 void Client::set_filer_flags(int flags)
 {
-  std::scoped_lock l(client_lock);
   ceph_assert(flags == 0 ||
 	 flags == CEPH_OSD_FLAG_LOCALIZE_READS);
   objecter->add_global_op_flags(flags);
@@ -16431,7 +16401,6 @@ void Client::set_filer_flags(int flags)
 
 void Client::clear_filer_flags(int flags)
 {
-  std::scoped_lock l(client_lock);
   ceph_assert(flags == CEPH_OSD_FLAG_LOCALIZE_READS);
   objecter->clear_global_op_flag(flags);
 }
