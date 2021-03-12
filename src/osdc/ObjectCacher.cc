@@ -87,8 +87,8 @@ public:
     : oc(_oc), rd(r), oset(os), onfinish(c), trace(trace) {
   }
   void finish(int r) override {
-    std::scoped_lock osl{oset->lock};
     if (r >= 0) {
+      std::scoped_lock osl{oset->lock};
       r = oc->_readx(rd, oset, onfinish, false, &trace);
     }
 
@@ -873,8 +873,6 @@ void ObjectCacher::bh_read_finish(int64_t poolid, sobject_t oid,
 				  uint64_t length, bufferlist &bl, int r,
 				  bool trust_enoent)
 {
-  std::unique_lock ocl{oc_lock};
-
   ldout(cct, 7) << "bh_read_finish "
 		<< oid
 		<< " tid " << tid
@@ -894,6 +892,7 @@ void ObjectCacher::bh_read_finish(int64_t poolid, sobject_t oid,
   list<Context*> ls;
   int err = 0;
 
+  std::unique_lock ocl{oc_lock};
   if (objects[poolid].count(oid) == 0) {
     ldout(cct, 7) << "bh_read_finish no object cache" << dendl;
   } else {
@@ -1037,14 +1036,16 @@ void ObjectCacher::bh_read_finish(int64_t poolid, sobject_t oid,
 
       ob->try_merge_bh(bh);
     }
+    ocl.lock();
   }
 
   // called with lock held.
   ldout(cct, 20) << "finishing waiters " << ls << dendl;
 
+  ocl.unlock();
   finish_contexts(cct, ls, err);
-
   ocl.lock();
+
   retry_waiting_reads();
 
   --reads_outstanding;
@@ -1058,9 +1059,9 @@ void ObjectCacher::bh_write_adjacencies(BufferHead *bh, ceph::real_time cutoff,
 
   list<BufferHead*> blist;
 
-  std::unique_lock ocl{oc_lock};
   int count = 0;
   int64_t total_len = 0;
+  std::unique_lock ocl{oc_lock};
   set<BufferHead*, BufferHead::ptr_lt>::iterator it = dirty_or_tx_bh.find(bh);
   ceph_assert(it != dirty_or_tx_bh.end());
   for (set<BufferHead*, BufferHead::ptr_lt>::iterator p = it;
@@ -1099,9 +1100,7 @@ void ObjectCacher::bh_write_adjacencies(BufferHead *bh, ceph::real_time cutoff,
     *max_amount -= total_len;
 
   ocl.unlock();
-  bh->ob->oset->lock.unlock();
   bh_write_scattered(blist);
-  bh->ob->oset->lock.lock();
   ocl.lock();
 }
 
@@ -1143,7 +1142,7 @@ public:
 void ObjectCacher::bh_write_scattered(list<BufferHead*>& blist)
 {
   Object *ob = blist.front()->ob;
-  std::scoped_lock osl{ob->oset->lock};
+  ceph_assert(ceph_mutex_is_locked_by_me(ob->oset->lock));
   ob->get();
 
   ceph::real_time last_write;
@@ -1371,9 +1370,11 @@ void ObjectCacher::flush(ZTracer::Trace *trace, loff_t amount)
     if (!bh) break;
 
     oc_lock.unlock();
-    std::scoped_lock osl{oc_lock};
-    if (bh->last_write > cutoff)
+    std::scoped_lock osl{bh->ob->oset->lock};
+    if (bh->last_write > cutoff) {
+      oc_lock.lock();
       break;
+    }
 
     if (scattered_write) {
       bh_write_adjacencies(bh, cutoff, amount > 0 ? &left : NULL, NULL);
@@ -1957,7 +1958,6 @@ void ObjectCacher::C_WaitForWrite::finish(int r)
 {
   m_oc->_maybe_wait_for_writeback(m_len, &m_trace);
 
-  std::scoped_lock osl(m_oset->lock);
   m_onfinish->complete(r);
 }
 
@@ -1965,7 +1965,6 @@ void ObjectCacher::_maybe_wait_for_writeback(uint64_t len,
 					     ZTracer::Trace *trace)
 {
   std::unique_lock ocl{oc_lock};
-
   ceph::mono_time start = ceph::mono_clock::now();
   int blocked = 0;
   // wait for writeback?
@@ -2020,9 +2019,9 @@ int ObjectCacher::_wait_for_write(OSDWrite *wr, uint64_t len, ObjectSet *oset,
     if (block_writes_upfront) {
       oset->lock.unlock();
       _maybe_wait_for_writeback(len, trace);
-      oset->lock.lock();
       if (onfreespace)
 	onfreespace->complete(0);
+      oset->lock.lock();
     } else {
       ceph_assert(onfreespace);
       finisher.queue(new C_WaitForWrite(this, oset, len, *trace, onfreespace));
@@ -2032,7 +2031,7 @@ int ObjectCacher::_wait_for_write(OSDWrite *wr, uint64_t len, ObjectSet *oset,
     ceph::condition_variable cond;
     bool done = false;
     Context *fin = block_writes_upfront ?
-      new C_Cond(cond, &done, &ret) : onfreespace;
+      new C_SafeCond(oset->lock, cond, &done, &ret) : onfreespace;
     ceph_assert(fin);
     bool flushed = flush_set(oset, wr->extents, trace, fin);
     ceph_assert(!flushed);   // we just dirtied it, and didn't drop our lock!
@@ -2043,8 +2042,11 @@ int ObjectCacher::_wait_for_write(OSDWrite *wr, uint64_t len, ObjectSet *oset,
       cond.wait(osl, [&done] { return done; });
       osl.release();
       ldout(cct, 10) << "wait_for_write woke up, ret " << ret << dendl;
-      if (onfreespace)
+      if (onfreespace) {
+        oset->lock.unlock();
 	onfreespace->complete(ret);
+        oset->lock.lock();
+      }
     }
   }
 
@@ -2052,6 +2054,7 @@ int ObjectCacher::_wait_for_write(OSDWrite *wr, uint64_t len, ObjectSet *oset,
   if (get_stat_dirty() > 0 && (uint64_t) get_stat_dirty() > target_dirty) {
     ldout(cct, 10) << "wait_for_write " << get_stat_dirty() << " > target "
 		   << target_dirty << ", nudging flusher" << dendl;
+    std::scoped_lock ocl{oc_lock};
     flusher_cond.notify_all();
   }
   return ret;
@@ -2280,7 +2283,9 @@ bool ObjectCacher::flush_set(ObjectSet *oset, Context *onfinish)
   ceph_assert(onfinish != NULL);
   if (oset->objects.empty()) {
     ldout(cct, 10) << "flush_set on " << oset << " dne" << dendl;
+    oset->lock.unlock();
     onfinish->complete(0);
+    oset->lock.lock();
     return true;
   }
 
@@ -2308,8 +2313,6 @@ bool ObjectCacher::flush_set(ObjectSet *oset, Context *onfinish)
   else
     backwards = false;
 
-  std::unique_lock osl{oset->lock, std::adopt_lock};
-
   for (; p != dirty_or_tx_bh.end(); p = q) {
     ++q;
     BufferHead *bh = *p;
@@ -2320,12 +2323,10 @@ bool ObjectCacher::flush_set(ObjectSet *oset, Context *onfinish)
       if (scattered_write) {
 	if (last_ob != bh->ob) {
 	  if (!blist.empty()) {
-	    osl.unlock();
+            ocl.unlock();
 	    bh_write_scattered(blist);
 	    blist.clear();
-	    ocl.unlock();
-	    osl.lock();
-	    ocl.lock();
+            ocl.lock();
 	  }
 	  last_ob = bh->ob;
 	}
@@ -2350,12 +2351,10 @@ bool ObjectCacher::flush_set(ObjectSet *oset, Context *onfinish)
 	if (scattered_write) {
 	  if (last_ob != bh->ob) {
 	    if (!blist.empty()) {
-	      osl.unlock();
+              ocl.unlock();
 	      bh_write_scattered(blist);
+              ocl.lock();
 	      blist.clear();
-	      ocl.unlock();
-	      osl.lock();
-	      ocl.lock();
 	    }
 	    last_ob = bh->ob;
 	  }
@@ -2369,27 +2368,31 @@ bool ObjectCacher::flush_set(ObjectSet *oset, Context *onfinish)
     }
   }
 
-  ocl.unlock();
-  osl.unlock();
-
-  if (scattered_write && !blist.empty())
+  if (scattered_write && !blist.empty()) {
+    ocl.unlock();
     bh_write_scattered(blist);
+    ocl.lock();
+  }
 
+  oset->lock.unlock();
   for (set<Object*>::iterator i = waitfor_commit.begin();
        i != waitfor_commit.end(); ++i) {
     Object *ob = *i;
 
+    ocl.unlock();
     std::scoped_lock osl{ob->oset->lock};
     // we'll need to gather...
     ldout(cct, 10) << "flush_set " << oset << " will wait for ack tid "
 		   << ob->last_write_tid << " on " << *ob << dendl;
     ob->waitfor_commit[ob->last_write_tid].push_back(gather.new_sub());
+    ocl.lock();
   }
 
-  osl.lock();
+  ocl.unlock();
+  bool r = _flush_set_finish(&gather, onfinish);
+  oset->lock.lock();
   ocl.lock();
-  osl.release();
-  return _flush_set_finish(&gather, onfinish);
+  return r;
 }
 
 // flush.  non-blocking, takes callback.
@@ -2402,7 +2405,9 @@ bool ObjectCacher::flush_set(ObjectSet *oset, vector<ObjectExtent>& exv,
   ceph_assert(onfinish != NULL);
   if (oset->objects.empty()) {
     ldout(cct, 10) << "flush_set on " << oset << " dne" << dendl;
+    oset->lock.unlock();
     onfinish->complete(0);
+    oset->lock.lock();
     return true;
   }
 
@@ -2419,7 +2424,7 @@ bool ObjectCacher::flush_set(ObjectSet *oset, vector<ObjectExtent>& exv,
     sobject_t soid(ex.oid, CEPH_NOSNAP);
     Object *ob;
     {
-      std::scoped_lock osl{ob->oset->lock};
+      std::scoped_lock ocl{oc_lock};
       if (objects[oset->poolid].count(soid) == 0)
         continue;
       ob = objects[oset->poolid][soid];
@@ -2436,7 +2441,10 @@ bool ObjectCacher::flush_set(ObjectSet *oset, vector<ObjectExtent>& exv,
     }
   }
 
-  return _flush_set_finish(&gather, onfinish);
+  oset->lock.unlock();
+  bool r = _flush_set_finish(&gather, onfinish);
+  oset->lock.lock();
+  return r;
 }
 
 // flush all dirty data.  non-blocking, takes callback.
@@ -2469,10 +2477,8 @@ bool ObjectCacher::flush_all(Context *onfinish)
         if (scattered_write) {
 	  if (last_ob != bh->ob) {
 	    if (!blist.empty()) {
-              osl.unlock();
 	      bh_write_scattered(blist);
 	      blist.clear();
-              osl.lock();
 	    }
 	    last_ob = bh->ob;
 	  }
@@ -2487,22 +2493,30 @@ bool ObjectCacher::flush_all(Context *onfinish)
     it = next;
   }
 
-  if (scattered_write && !blist.empty())
+  if (scattered_write && !blist.empty()) {
+    ocl.unlock();
     bh_write_scattered(blist);
+    ocl.lock();
+  }
 
   for (set<Object*>::iterator i = waitfor_commit.begin();
        i != waitfor_commit.end();
        ++i) {
     Object *ob = *i;
 
+    ocl.unlock();
     std::scoped_lock osl{ob->oset->lock};
     // we'll need to gather...
     ldout(cct, 10) << "flush_all will wait for ack tid "
 		   << ob->last_write_tid << " on " << *ob << dendl;
     ob->waitfor_commit[ob->last_write_tid].push_back(gather.new_sub());
+    ocl.lock();
   }
 
-  return _flush_set_finish(&gather, onfinish);
+  ocl.unlock();
+  bool r = _flush_set_finish(&gather, onfinish);
+  ocl.lock();
+  return r;
 }
 
 void ObjectCacher::purge_set(ObjectSet *oset)
@@ -2714,10 +2728,10 @@ void ObjectCacher::discard_writeback(ObjectSet *oset,
     bool flushed = was_dirty && oset->dirty_or_tx == 0;
     gather.set_finisher(new LambdaContext(
       [this, oset, flushed, on_finish](int) {
-        std::scoped_lock osl{oset->lock};
-
-	if (flushed && flush_set_callback)
+	if (flushed && flush_set_callback) {
+          std::scoped_lock osl{oset->lock};
 	  flush_set_callback(flush_set_callback_arg, oset);
+        }
 	if (on_finish)
 	  on_finish->complete(0);
       }));
@@ -2763,7 +2777,9 @@ void ObjectCacher::_discard_finish(ObjectSet *oset, bool was_dirty,
 
   // notify that in-flight writeback has completed
   if (on_finish != nullptr) {
+    oset->lock.unlock();
     on_finish->complete(0);
+    oset->lock.lock();
   }
 }
 
