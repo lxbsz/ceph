@@ -511,6 +511,7 @@ public:
   int rmsnap(const char *path, const char *name, const UserPerm& perm, bool check_perms=false);
 
   // Inode permission checking
+  int _inode_permission(Inode *in, const UserPerm& perms, unsigned want);
   int inode_permission(Inode *in, const UserPerm& perms, unsigned want);
 
   // expose caps

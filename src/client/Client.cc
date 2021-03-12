@@ -1296,17 +1296,15 @@ void Client::insert_readdir_results(MetaRequest *request, MetaSession *session, 
   auto p = reply->get_extra_bl().cbegin();
   if (!p.end()) {
     // snapdir?
+    client_lock.unlock();
     {
-      client_lock.unlock();
       std::scoped_lock il{diri->inode_lock};
       if (request->head.op == CEPH_MDS_OP_LSSNAP) {
         ceph_assert(diri);
         diri = open_snapdir(diri);
       }
-      client_lock.lock();
     }
 
-    client_lock.unlock();
     std::unique_lock il{diri->inode_lock};
     // only open dir if we're actually adding stuff to it!
     Dir *dir = diri->open_dir();
@@ -4884,7 +4882,9 @@ int Client::_do_remount(bool retry_on_error)
   uint64_t max_retries = cct->_conf.get_val<uint64_t>("mds_max_retries_on_remount_failure");
 
   errno = 0;
+  client_lock.unlock();
   int r = remount_cb(callback_handle);
+  client_lock.lock();
   if (r == 0) {
     retries_on_invalidate = 0;
   } else {
@@ -6341,6 +6341,12 @@ void Client::handle_cap_grant(MetaSession *session, Inode *in, Cap *cap, const M
 
 int Client::inode_permission(Inode *in, const UserPerm& perms, unsigned want)
 {
+  std::scoped_lock il{in->inode_lock};
+  return _inode_permission(in, perms, want);
+}
+
+int Client::_inode_permission(Inode *in, const UserPerm& perms, unsigned want)
+{
   ceph_assert(ceph_mutex_is_locked_by_me(in->inode_lock));
 
   if (perms.uid() == 0)
@@ -6371,7 +6377,7 @@ int Client::xattr_permission(Inode *in, const char *name, unsigned want,
     if ((want & MAY_WRITE) && (perms.uid() != 0 && perms.uid() != in->uid))
       r = -CEPHFS_EPERM;
   } else {
-    r = inode_permission(in, perms, want);
+    r = _inode_permission(in, perms, want);
   }
 out:
   ldout(cct, 5) << __func__ << " " << in << " = " << r <<  dendl;
@@ -6393,7 +6399,7 @@ int Client::may_setattr(Inode *in, struct ceph_statx *stx, int mask,
     goto out;
 
   if (mask & CEPH_SETATTR_SIZE) {
-    r = inode_permission(in, perms, MAY_WRITE);
+    r = _inode_permission(in, perms, MAY_WRITE);
     if (r < 0)
       goto out;
   }
@@ -6429,7 +6435,7 @@ int Client::may_setattr(Inode *in, struct ceph_statx *stx, int mask,
       if (check_mask & mask) {
 	goto out;
       } else {
-	r = inode_permission(in, perms, MAY_WRITE);
+	r = _inode_permission(in, perms, MAY_WRITE);
 	if (r < 0)
 	  goto out;
       }
@@ -6474,7 +6480,7 @@ int Client::may_open(Inode *in, int flags, const UserPerm& perms)
   if (r < 0)
     goto out;
 
-  r = inode_permission(in, perms, want);
+  r = _inode_permission(in, perms, want);
 out:
   ldout(cct, 3) << __func__ << " " << in << " = " << r <<  dendl;
   return r;
@@ -6489,7 +6495,7 @@ int Client::may_lookup(Inode *dir, const UserPerm& perms)
   if (r < 0)
     goto out;
 
-  r = inode_permission(dir, perms, MAY_EXEC);
+  r = _inode_permission(dir, perms, MAY_EXEC);
 out:
   ldout(cct, 3) << __func__ << " " << dir << " = " << r <<  dendl;
   return r;
@@ -6504,7 +6510,7 @@ int Client::may_create(Inode *dir, const UserPerm& perms)
   if (r < 0)
     goto out;
 
-  r = inode_permission(dir, perms, MAY_EXEC | MAY_WRITE);
+  r = _inode_permission(dir, perms, MAY_EXEC | MAY_WRITE);
 out:
   ldout(cct, 3) << __func__ << " " << dir << " = " << r <<  dendl;
   return r;
@@ -6519,7 +6525,7 @@ int Client::may_delete(Inode *dir, const char *name, const UserPerm& perms)
   if (r < 0)
     goto out;
 
-  r = inode_permission(dir, perms, MAY_EXEC | MAY_WRITE);
+  r = _inode_permission(dir, perms, MAY_EXEC | MAY_WRITE);
   if (r < 0)
     goto out;
 
@@ -6587,7 +6593,7 @@ int Client::may_hardlink(Inode *in, const UserPerm& perms)
   if ((in->mode & (S_ISGID | S_IXGRP)) == (S_ISGID | S_IXGRP))
     goto out;
 
-  r = inode_permission(in, perms, MAY_READ | MAY_WRITE);
+  r = _inode_permission(in, perms, MAY_READ | MAY_WRITE);
 out:
   ldout(cct, 3) << __func__ << " " << in << " = " << r <<  dendl;
   return r;
