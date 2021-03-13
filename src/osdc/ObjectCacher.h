@@ -144,6 +144,7 @@ class ObjectCacher {
 
     // states
     void set_state(int s) {
+      ceph_assert(ceph_mutex_is_locked_by_me(ob->oc->oc_lock));
       if (s == STATE_RX || s == STATE_TX) get();
       if (state == STATE_RX || state == STATE_TX) put();
       state = s;
@@ -167,11 +168,13 @@ class ObjectCacher {
 
     // reference counting
     int get() {
+      ceph_assert(ceph_mutex_is_locked_by_me(ob->oc->oc_lock));
       ceph_assert(ref >= 0);
       if (ref == 0) lru_pin();
       return ++ref;
     }
     int put() {
+      ceph_assert(ceph_mutex_is_locked_by_me(ob->oc->oc_lock));
       ceph_assert(ref > 0);
       if (ref == 1) lru_unpin();
       --ref;
@@ -218,11 +221,11 @@ class ObjectCacher {
   private:
     // ObjectCacher::Object fields
     int ref = 0;
-    ObjectCacher *oc;
     sobject_t oid;
     friend struct ObjectSet;
 
   public:
+    ObjectCacher *oc;
     uint64_t object_no;
     ObjectSet *oset;
     xlist<Object*>::item set_item;
@@ -247,7 +250,7 @@ class ObjectCacher {
 
     Object(ObjectCacher *_oc, sobject_t o, uint64_t ono, ObjectSet *os,
 	   object_locator_t& l, uint64_t ts, uint64_t tq) :
-      oc(_oc), oid(o), object_no(ono), oset(os), set_item(this), oloc(l),
+      oid(o), oc(_oc), object_no(ono), oset(os), set_item(this), oloc(l),
       truncate_size(ts), truncate_seq(tq) {
       // add to set
       os->objects.push_back(&set_item);
@@ -271,6 +274,7 @@ class ObjectCacher {
     void set_object_locator(object_locator_t& l) { oloc = l; }
 
     bool can_close() const {
+      std::scoped_lock ocl{oc->oc_lock};
       if (lru_is_expireable()) {
 	ceph_assert(data.empty());
 	ceph_assert(waitfor_commit.empty());
@@ -307,12 +311,14 @@ class ObjectCacher {
     // bh
     // add to my map
     void add_bh(BufferHead *bh) {
+      ceph_assert(ceph_mutex_is_locked_by_me(oc->oc_lock));
       if (data.empty())
 	get();
       ceph_assert(data.count(bh->start()) == 0);
       data[bh->start()] = bh;
     }
     void remove_bh(BufferHead *bh) {
+      ceph_assert(ceph_mutex_is_locked_by_me(oc->oc_lock));
       ceph_assert(data.count(bh->start()));
       data.erase(bh->start());
       if (data.empty())
@@ -343,11 +349,13 @@ class ObjectCacher {
 
     // reference counting
     int get() {
+      ceph_assert(ceph_mutex_is_locked_by_me(oc->oc_lock));
       ceph_assert(ref >= 0);
       if (ref == 0) lru_pin();
       return ++ref;
     }
     int put() {
+      ceph_assert(ceph_mutex_is_locked_by_me(oc->oc_lock));
       ceph_assert(ref > 0);
       if (ref == 1) lru_unpin();
       --ref;
@@ -506,6 +514,8 @@ class ObjectCacher {
   }
   void mark_dirty(BufferHead *bh) {
     bh_set_state(bh, BufferHead::STATE_DIRTY);
+
+    std::scoped_lock ocl{oc_lock};
     bh_lru_dirty.lru_touch(bh);
     //bh->set_dirty_stamp(ceph_clock_now());
   }

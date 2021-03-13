@@ -120,7 +120,10 @@ ObjectCacher::BufferHead *ObjectCacher::Object::split(BufferHead *left,
 
   right->last_write_tid = left->last_write_tid;
   right->last_read_tid = left->last_read_tid;
-  right->set_state(left->get_state());
+  {
+    std::scoped_lock ocl{oc->oc_lock};
+    right->set_state(left->get_state());
+  }
   right->snapc = left->snapc;
   right->set_journal_tid(left->journal_tid);
 
@@ -712,7 +715,7 @@ ObjectCacher::ObjectCacher(CephContext *cct_, string name,
 			   uint64_t max_objects, uint64_t max_dirty,
 			   uint64_t target_dirty, double max_dirty_age,
 			   bool block_writes_upfront)
-  : cct(cct_), writeback_handler(wb), name(name), lock(l),
+  : cct(cct_), writeback_handler(wb), name(name),
     max_dirty(max_dirty), target_dirty(target_dirty),
     max_size(max_bytes), max_objects(max_objects),
     max_dirty_age(ceph::make_timespan(max_dirty_age)),
@@ -1138,7 +1141,10 @@ void ObjectCacher::bh_write_scattered(list<BufferHead*>& blist)
 {
   Object *ob = blist.front()->ob;
   ceph_assert(ceph_mutex_is_locked_by_me(ob->oset->lock));
-  ob->get();
+  {
+    std::scoped_lock ocl{oc_lock};
+    ob->get();
+  }
 
   ceph::real_time last_write;
   SnapContext snapc;
@@ -1191,7 +1197,10 @@ void ObjectCacher::bh_write(BufferHead *bh, const ZTracer::Trace &parent_trace)
   ceph_assert(ceph_mutex_is_locked_by_me(bh->ob->oset->lock));
   ldout(cct, 7) << "bh_write " << *bh << dendl;
 
-  bh->ob->get();
+  {
+    std::scoped_lock ocl{oc_lock};
+    bh->ob->get();
+  }
 
   ZTracer::Trace trace;
   if (parent_trace.valid()) {
@@ -1329,7 +1338,10 @@ void ObjectCacher::bh_write_commit(int64_t poolid, sobject_t oid,
 
   // is the entire object set now clean and fully committed?
   ObjectSet *oset = ob->oset;
-  ob->put();
+  {
+    std::scoped_lock ocl{oc_lock};
+    ob->put();
+  }
 
   if (flush_set_callback &&
       was_dirty_or_tx > 0 &&
@@ -2964,9 +2976,9 @@ void ObjectCacher::bh_add(Object *ob, BufferHead *bh)
   ceph_assert(ceph_mutex_is_locked_by_me(ob->oset->lock));
 
   ldout(cct, 30) << "bh_add " << *ob << " " << *bh << dendl;
-  ob->add_bh(bh);
 
   std::scoped_lock ocl{oc_lock};
+  ob->add_bh(bh);
   if (bh->is_dirty()) {
     bh_lru_dirty.lru_insert_top(bh);
     dirty_or_tx_bh.insert(bh);
@@ -2988,9 +3000,9 @@ void ObjectCacher::bh_remove(Object *ob, BufferHead *bh)
   ceph_assert(ceph_mutex_is_locked_by_me(ob->oset->lock));
   ceph_assert(bh->get_journal_tid() == 0);
   ldout(cct, 30) << "bh_remove " << *ob << " " << *bh << dendl;
-  ob->remove_bh(bh);
 
   std::scoped_lock ocl{oc_lock};
+  ob->remove_bh(bh);
   if (bh->is_dirty()) {
     bh_lru_dirty.lru_remove(bh);
     dirty_or_tx_bh.erase(bh);
