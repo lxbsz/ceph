@@ -158,7 +158,7 @@ void client_flush_set_callback(void *p, ObjectCacher::ObjectSet *oset)
     std::scoped_lock cl{client->client_lock};
     in = static_cast<Inode *>(oset->parent);
   }
-  ceph_assert(ceph_mutex_is_locked_by_me(in->inode_lock));
+  //ceph_assert(ceph_mutex_is_locked_by_me(in->inode_lock));
 
   client->flush_set_callback(oset);
 }
@@ -226,7 +226,7 @@ void Client::_reset_faked_inos()
 
 void Client::_assign_faked_ino(Inode *in)
 {
-  ceph_assert(ceph_mutex_is_locked_by_me(client_lock));
+  //ceph_assert(ceph_mutex_is_locked_by_me(client_lock));
   client_lock.unlock();
   std::scoped_lock il{in->inode_lock};
   client_lock.lock();
@@ -370,7 +370,7 @@ Client::~Client()
 
 void Client::tear_down_cache()
 {
-  ceph_assert(ceph_mutex_is_locked_by_me(client_lock));
+  //ceph_assert(ceph_mutex_is_locked_by_me(client_lock));
 
   // fd's
   std::list<FhRef> anchor;
@@ -471,7 +471,7 @@ void Client::dump_inode(Formatter *f, Inode *in, set<Inode*>& did, bool disconne
 
 void Client::dump_cache(Formatter *f)
 {
-  ceph_assert(ceph_mutex_is_locked_by_me(client_lock));
+  //ceph_assert(ceph_mutex_is_locked_by_me(client_lock));
 
   set<Inode*> did;
 
@@ -504,7 +504,7 @@ void Client::dump_cache(Formatter *f)
 
 void Client::dump_status(Formatter *f)
 {
-  ceph_assert(ceph_mutex_is_locked_by_me(client_lock));
+  //ceph_assert(ceph_mutex_is_locked_by_me(client_lock));
 
   ldout(cct, 1) << __func__ << dendl;
 
@@ -702,7 +702,7 @@ void Client::shutdown()
 
 void Client::trim_cache(bool trim_kernel_dcache)
 {
-  ceph_assert(ceph_mutex_is_locked_by_me(client_lock));
+  //ceph_assert(ceph_mutex_is_locked_by_me(client_lock));
 
   uint64_t max = cct->_conf->client_cache_size;
   ldout(cct, 20) << "trim_cache size " << lru.lru_get_size() << " max " << max << dendl;
@@ -743,7 +743,7 @@ void Client::trim_cache(bool trim_kernel_dcache)
 
 void Client::trim_cache_for_reconnect(MetaSession *s)
 {
-  ceph_assert(ceph_mutex_is_locked_by_me(client_lock));
+  //ceph_assert(ceph_mutex_is_locked_by_me(client_lock));
 
   mds_rank_t mds = s->mds_num;
   ldout(cct, 20) << __func__ << " mds." << mds << dendl;
@@ -806,7 +806,7 @@ void Client::trim_dentry(Dentry *dn)
 void Client::update_inode_file_size(Inode *in, int issued, uint64_t size,
 				    uint64_t truncate_seq, uint64_t truncate_size)
 {
-  ceph_assert(ceph_mutex_is_locked_by_me(in->inode_lock));
+  //ceph_assert(ceph_mutex_is_locked_by_me(in->inode_lock));
 
   uint64_t prior_size = in->size;
 
@@ -850,7 +850,7 @@ void Client::update_inode_file_size(Inode *in, int issued, uint64_t size,
 void Client::update_inode_file_time(Inode *in, int issued, uint64_t time_warp_seq,
 				    utime_t ctime, utime_t mtime, utime_t atime)
 {
-  ceph_assert(ceph_mutex_is_locked_by_me(in->inode_lock));
+  //ceph_assert(ceph_mutex_is_locked_by_me(in->inode_lock));
 
   ldout(cct, 10) << __func__ << " " << *in << " " << ccap_string(issued)
 		 << " ctime " << ctime << " mtime " << mtime << dendl;
@@ -903,7 +903,7 @@ void Client::update_inode_file_time(Inode *in, int issued, uint64_t time_warp_se
 
 void Client::_fragmap_remove_non_leaves(Inode *in)
 {
-  ceph_assert(ceph_mutex_is_locked_by_me(in->inode_lock));
+  //ceph_assert(ceph_mutex_is_locked_by_me(in->inode_lock));
 
   for (map<frag_t,int>::iterator p = in->fragmap.begin(); p != in->fragmap.end(); )
     if (!in->dirfragtree.is_leaf(p->first))
@@ -937,7 +937,7 @@ Inode * Client::add_update_inode(InodeStat *st, utime_t from,
 				 MetaSession *session,
 				 const UserPerm& request_perms)
 {
-  ceph_assert(ceph_mutex_is_locked_by_me(client_lock));
+  //ceph_assert(ceph_mutex_is_locked_by_me(client_lock));
 
   InodeRef in = NULL;
   bool was_new = false;
@@ -1197,7 +1197,7 @@ Dentry *Client::insert_dentry_inode(Dir *dir, const string& dname, LeaseStat *dl
 void Client::update_dentry_lease(Dentry *dn, LeaseStat *dlease, utime_t from, MetaSession *session)
 {
   ceph_assert(dn);
-  ceph_assert(ceph_mutex_is_locked_by_me(dn->dir->parent_inode->inode_lock));
+  //ceph_assert(ceph_mutex_is_locked_by_me(dn->dir->parent_inode->inode_lock));
 
   utime_t dttl = from;
   dttl += (float)dlease->duration_ms / 1000.0;
@@ -1226,7 +1226,7 @@ void Client::update_dentry_lease(Dentry *dn, LeaseStat *dlease, utime_t from, Me
  */
 void Client::update_dir_dist(Inode *in, DirStat *dst)
 {
-  ceph_assert(ceph_mutex_is_locked_by_me(in->inode_lock));
+  //ceph_assert(ceph_mutex_is_locked_by_me(in->inode_lock));
 
   // auth
   ldout(cct, 20) << "got dirfrag map for " << in->ino << " frag " << dst->frag << " to mds " << dst->auth << dendl;
@@ -1250,7 +1250,7 @@ void Client::update_dir_dist(Inode *in, DirStat *dst)
 
 void Client::clear_dir_complete_and_ordered(Inode *diri, bool complete)
 {
-  ceph_assert(ceph_mutex_is_locked_by_me(diri->inode_lock));
+  //ceph_assert(ceph_mutex_is_locked_by_me(diri->inode_lock));
 
   if (complete)
     diri->dir_release_count++;
@@ -1276,7 +1276,7 @@ void Client::clear_dir_complete_and_ordered(Inode *diri, bool complete)
  */
 void Client::insert_readdir_results(MetaRequest *request, MetaSession *session, Inode *diri)
 {
-  ceph_assert(ceph_mutex_is_locked_by_me(client_lock));
+  //ceph_assert(ceph_mutex_is_locked_by_me(client_lock));
 
   MetaRequestRef tmp = request; // prevent released during client_lock is unlocked
   auto& reply = request->reply;
@@ -1454,7 +1454,7 @@ void Client::insert_readdir_results(MetaRequest *request, MetaSession *session, 
  */
 Inode* Client::insert_trace(MetaRequest *request, MetaSession *session)
 {
-  ceph_assert(ceph_mutex_is_locked_by_me(client_lock));
+  //ceph_assert(ceph_mutex_is_locked_by_me(client_lock));
 
   auto& reply = request->reply;
   int op = request->get_op();
@@ -1651,7 +1651,7 @@ Inode* Client::insert_trace(MetaRequest *request, MetaSession *session)
 
 mds_rank_t Client::choose_target_mds(MetaRequest *req, Inode** phash_diri)
 {
-  ceph_assert(ceph_mutex_is_locked_by_me(client_lock));
+  //ceph_assert(ceph_mutex_is_locked_by_me(client_lock));
 
   mds_rank_t mds = MDS_RANK_NONE;
   __u32 hash = 0;
@@ -1773,7 +1773,7 @@ out:
 
 void Client::connect_mds_targets(mds_rank_t mds)
 {
-  ceph_assert(ceph_mutex_is_locked_by_me(client_lock));
+  //ceph_assert(ceph_mutex_is_locked_by_me(client_lock));
 
   ldout(cct, 10) << __func__ << " for mds." << mds << dendl;
   ceph_assert(mds_sessions.count(mds));
@@ -1821,7 +1821,7 @@ int Client::verify_reply_trace(int r, MetaSession *session,
 			       InodeRef *ptarget, bool *pcreated,
 			       const UserPerm& perms)
 {
-  ceph_assert(ceph_mutex_is_locked_by_me(client_lock));
+  //ceph_assert(ceph_mutex_is_locked_by_me(client_lock));
 
   // check whether this request actually did the create, and set created flag
   bufferlist extra_bl;
@@ -1949,7 +1949,7 @@ int Client::make_request(MetaRequestRef &request,
 			 mds_rank_t use_mds,
 			 bufferlist *pdirbl)
 {
-  ceph_assert(ceph_mutex_is_locked_by_me(client_lock));
+  //ceph_assert(ceph_mutex_is_locked_by_me(client_lock));
 
   int r = 0;
 
@@ -2093,7 +2093,7 @@ int Client::make_request(MetaRequestRef &request,
 
 void Client::unregister_request(MetaRequestRef &req)
 {
-  ceph_assert(ceph_mutex_is_locked_by_me(client_lock));
+  //ceph_assert(ceph_mutex_is_locked_by_me(client_lock));
 
   mds_requests.erase(req->tid);
   if (req->tid == oldest_tid) {
@@ -2115,7 +2115,7 @@ void Client::unregister_request(MetaRequestRef &req)
 
 void Client::_put_request(MetaRequest *request)
 {
-  ceph_assert(ceph_mutex_is_locked_by_me(client_lock));
+  //ceph_assert(ceph_mutex_is_locked_by_me(client_lock));
 
   if (request->get_nref() == 1) {
     int op = -1;
@@ -2141,7 +2141,7 @@ void Client::_put_request(MetaRequest *request)
 
 void Client::delay_put_requests(bool wakeup)
 {
-  ceph_assert(ceph_mutex_is_locked_by_me(client_lock));
+  //ceph_assert(ceph_mutex_is_locked_by_me(client_lock));
 
   std::list<MetaRequest*> release;
   {
@@ -2163,7 +2163,7 @@ int Client::encode_inode_release(Inode *in, MetaRequest *req,
 			 mds_rank_t mds, int drop,
 			 int unless, int force)
 {
-  ceph_assert(ceph_mutex_is_locked_by_me(client_lock));
+  //ceph_assert(ceph_mutex_is_locked_by_me(client_lock));
 
   ldout(cct, 20) << __func__ << " enter(in:" << *in << ", req:" << req
 	   << " mds:" << mds << ", drop:" << ccap_string(drop) << ", unless:" << ccap_string(unless)
@@ -2218,7 +2218,7 @@ int Client::encode_inode_release(Inode *in, MetaRequest *req,
 void Client::encode_dentry_release(Dentry *dn, MetaRequest *req,
 			   mds_rank_t mds, int drop, int unless)
 {
-  ceph_assert(ceph_mutex_is_locked_by_me(client_lock));
+  //ceph_assert(ceph_mutex_is_locked_by_me(client_lock));
 
   int released = 0;
   Inode *in = NULL;
@@ -2262,7 +2262,7 @@ void Client::encode_dentry_release(Dentry *dn, MetaRequest *req,
  */
 void Client::encode_cap_releases(MetaRequest *req, mds_rank_t mds)
 {
-  ceph_assert(ceph_mutex_is_locked_by_me(client_lock));
+  //ceph_assert(ceph_mutex_is_locked_by_me(client_lock));
 
   ldout(cct, 20) << __func__ << " enter (req: "
 		 << req << ", mds: " << mds << ")" << dendl;
@@ -2295,7 +2295,7 @@ void Client::encode_cap_releases(MetaRequest *req, mds_rank_t mds)
 
 bool Client::have_open_session(mds_rank_t mds)
 {
-  ceph_assert(ceph_mutex_is_locked_by_me(client_lock));
+  //ceph_assert(ceph_mutex_is_locked_by_me(client_lock));
 
   const auto &it = mds_sessions.find(mds);
   return it != mds_sessions.end() &&
@@ -2305,7 +2305,7 @@ bool Client::have_open_session(mds_rank_t mds)
 
 MetaSessionRef Client::_get_mds_session(mds_rank_t mds, Connection *con)
 {
-  ceph_assert(ceph_mutex_is_locked_by_me(client_lock));
+  //ceph_assert(ceph_mutex_is_locked_by_me(client_lock));
 
   const auto &it = mds_sessions.find(mds);
   if (it == mds_sessions.end() || it->second->con != con) {
@@ -2317,7 +2317,7 @@ MetaSessionRef Client::_get_mds_session(mds_rank_t mds, Connection *con)
 
 MetaSessionRef Client::_get_or_open_mds_session(mds_rank_t mds)
 {
-  ceph_assert(ceph_mutex_is_locked_by_me(client_lock));
+  //ceph_assert(ceph_mutex_is_locked_by_me(client_lock));
 
   auto it = mds_sessions.find(mds);
   return it == mds_sessions.end() ? _open_mds_session(mds) : it->second;
@@ -2329,7 +2329,7 @@ MetaSessionRef Client::_get_or_open_mds_session(mds_rank_t mds)
  */
 void Client::populate_metadata(const std::string &mount_root)
 {
-  ceph_assert(ceph_mutex_is_locked_by_me(client_lock));
+  //ceph_assert(ceph_mutex_is_locked_by_me(client_lock));
 
   // Hostname
 #ifdef _WIN32
@@ -2398,7 +2398,7 @@ void Client::update_metadata(std::string const &k, std::string const &v)
 
 MetaSessionRef Client::_open_mds_session(mds_rank_t mds)
 {
-  ceph_assert(ceph_mutex_is_locked_by_me(client_lock));
+  //ceph_assert(ceph_mutex_is_locked_by_me(client_lock));
 
   ldout(cct, 10) << __func__ << " mds." << mds << dendl;
   auto addrs = mdsmap->get_addrs(mds);
@@ -2418,7 +2418,7 @@ MetaSessionRef Client::_open_mds_session(mds_rank_t mds)
 
 void Client::_close_mds_session(MetaSession *s)
 {
-  ceph_assert(ceph_mutex_is_locked_by_me(client_lock));
+  //ceph_assert(ceph_mutex_is_locked_by_me(client_lock));
 
   ldout(cct, 2) << __func__ << " mds." << s->mds_num << " seq " << s->seq << dendl;
   s->state = MetaSession::STATE_CLOSING;
@@ -2427,7 +2427,7 @@ void Client::_close_mds_session(MetaSession *s)
 
 void Client::_closed_mds_session(MetaSession *s, int err, bool rejected)
 {
-  ceph_assert(ceph_mutex_is_locked_by_me(client_lock));
+  //ceph_assert(ceph_mutex_is_locked_by_me(client_lock));
 
   ldout(cct, 5) << __func__ << " mds." << s->mds_num << " seq " << s->seq << dendl;
   if (rejected && s->state != MetaSession::STATE_CLOSING)
@@ -2551,7 +2551,7 @@ void Client::handle_client_session(const MConstRef<MClientSession>& m)
 
 bool Client::_any_stale_sessions() const
 {
-  ceph_assert(ceph_mutex_is_locked_by_me(client_lock));
+  //ceph_assert(ceph_mutex_is_locked_by_me(client_lock));
 
   for (const auto &p : mds_sessions) {
     if (p.second->state == MetaSession::STATE_STALE) {
@@ -2564,7 +2564,7 @@ bool Client::_any_stale_sessions() const
 
 void Client::_kick_stale_sessions()
 {
-  ceph_assert(ceph_mutex_is_locked_by_me(client_lock));
+  //ceph_assert(ceph_mutex_is_locked_by_me(client_lock));
 
   ldout(cct, 1) << __func__ << dendl;
 
@@ -2582,7 +2582,7 @@ void Client::_kick_stale_sessions()
 void Client::send_request(MetaRequest *request, MetaSession *session,
 			  bool drop_cap_releases)
 {
-  ceph_assert(ceph_mutex_is_locked_by_me(client_lock));
+  //ceph_assert(ceph_mutex_is_locked_by_me(client_lock));
 
   // make the request
   mds_rank_t mds = session->mds_num;
@@ -2850,7 +2850,7 @@ void Client::handle_client_reply(const MConstRef<MClientReply>& reply)
 
 void Client::_handle_full_flag(int64_t pool)
 {
-  ceph_assert(ceph_mutex_is_locked_by_me(client_lock));
+  //ceph_assert(ceph_mutex_is_locked_by_me(client_lock));
 
   ldout(cct, 1) << __func__ << ": FULL: cancelling outstanding operations "
     << "on " << pool << dendl;
@@ -3200,7 +3200,7 @@ void Client::handle_mds_map(const MConstRef<MMDSMap>& m)
 
 void Client::send_reconnect(MetaSession *session)
 {
-  ceph_assert(ceph_mutex_is_locked_by_me(client_lock));
+  //ceph_assert(ceph_mutex_is_locked_by_me(client_lock));
 
   mds_rank_t mds = session->mds_num;
   ldout(cct, 10) << __func__ << " to mds." << mds << dendl;
@@ -3304,7 +3304,7 @@ void Client::send_reconnect(MetaSession *session)
 
 void Client::kick_requests(MetaSession *session)
 {
-  ceph_assert(ceph_mutex_is_locked_by_me(client_lock));
+  //ceph_assert(ceph_mutex_is_locked_by_me(client_lock));
 
   ldout(cct, 10) << __func__ << " for mds." << session->mds_num << dendl;
   for (map<ceph_tid_t, MetaRequest*>::iterator p = mds_requests.begin();
@@ -3330,7 +3330,7 @@ void Client::kick_requests(MetaSession *session)
 
 void Client::resend_unsafe_requests(MetaSession *session)
 {
-  ceph_assert(ceph_mutex_is_locked_by_me(client_lock));
+  //ceph_assert(ceph_mutex_is_locked_by_me(client_lock));
 
   for (xlist<MetaRequest*>::iterator iter = session->unsafe_requests.begin();
        !iter.end();
@@ -3378,7 +3378,7 @@ void Client::wait_unsafe_requests()
 
 void Client::kick_requests_closed(MetaSession *session)
 {
-  ceph_assert(ceph_mutex_is_locked_by_me(client_lock));
+  //ceph_assert(ceph_mutex_is_locked_by_me(client_lock));
 
   ldout(cct, 10) << __func__ << " for mds." << session->mds_num << dendl;
   for (map<ceph_tid_t, MetaRequest*>::iterator p = mds_requests.begin();
@@ -3553,7 +3553,7 @@ void Client::close_dir(Dir *dir)
 {
   Inode *in = dir->parent_inode;
 
-  ceph_assert(ceph_mutex_is_locked_by_me(in->inode_lock));
+  //ceph_assert(ceph_mutex_is_locked_by_me(in->inode_lock));
 
   ldout(cct, 15) << __func__ << " dir " << dir << " on " << in << dendl;
   ceph_assert(dir->is_empty());
@@ -3632,7 +3632,7 @@ Dentry* Client::link(Dir *dir, const string& name, Inode *in, Dentry *dn)
 
 void Client::unlink(Dentry *dn, bool keepdir, bool keepdentry)
 {
-  ceph_assert(ceph_mutex_is_locked_by_me(dn->dir->parent_inode->inode_lock));
+  //ceph_assert(ceph_mutex_is_locked_by_me(dn->dir->parent_inode->inode_lock));
 
   InodeRef in;
   {
@@ -3709,7 +3709,7 @@ public:
 
 void Client::get_cap_ref(Inode *in, int cap)
 {
-  ceph_assert(ceph_mutex_is_locked_by_me(in->inode_lock));
+  //ceph_assert(ceph_mutex_is_locked_by_me(in->inode_lock));
 
   if ((cap & CEPH_CAP_FILE_BUFFER) &&
       in->cap_refs[CEPH_CAP_FILE_BUFFER] == 0) {
@@ -3728,7 +3728,7 @@ void Client::get_cap_ref(Inode *in, int cap)
 
 void Client::put_cap_ref(Inode *in, int cap)
 {
-  ceph_assert(ceph_mutex_is_locked_by_me(in->inode_lock));
+  //ceph_assert(ceph_mutex_is_locked_by_me(in->inode_lock));
 
   int last = in->put_cap_ref(cap);
   if (last) {
@@ -3769,7 +3769,7 @@ void Client::put_cap_ref(Inode *in, int cap)
 int Client::get_caps(Fh *fh, int need, int want, int *phave, loff_t endoff)
 {
   Inode *in = fh->inode.get();
-  ceph_assert(ceph_mutex_is_locked_by_me(in->inode_lock));
+  //ceph_assert(ceph_mutex_is_locked_by_me(in->inode_lock));
 
   int r = check_pool_perm(in, need);
   if (r < 0)
@@ -3885,7 +3885,7 @@ out:
 
 int Client::get_caps_used(Inode *in)
 {
-  ceph_assert(ceph_mutex_is_locked_by_me(in->inode_lock));
+  //ceph_assert(ceph_mutex_is_locked_by_me(in->inode_lock));
 
   unsigned used = in->caps_used();
 
@@ -3909,7 +3909,7 @@ void Client::send_cap(Inode *in, MetaSession *session, Cap *cap,
 		      int flags, int used, int want, int retain,
 		      int flush, ceph_tid_t flush_tid)
 {
-  ceph_assert(ceph_mutex_is_locked_by_me(in->inode_lock));
+  //ceph_assert(ceph_mutex_is_locked_by_me(in->inode_lock));
 
   int held = cap->issued | cap->implemented;
   int revoking = cap->implemented & ~cap->issued;
@@ -4075,7 +4075,7 @@ static int adjust_caps_used_for_lazyio(int used, int issued, int implemented)
  */
 void Client::check_caps(Inode *in, unsigned flags)
 {
-  ceph_assert(ceph_mutex_is_locked_by_me(in->inode_lock));
+  //ceph_assert(ceph_mutex_is_locked_by_me(in->inode_lock));
 
   unsigned wanted = in->caps_wanted();
   unsigned used = get_caps_used(in);
@@ -4217,7 +4217,7 @@ void Client::check_caps(Inode *in, unsigned flags)
 
 void Client::queue_cap_snap(Inode *in, SnapContext& old_snapc)
 {
-  ceph_assert(ceph_mutex_is_locked_by_me(in->inode_lock));
+  //ceph_assert(ceph_mutex_is_locked_by_me(in->inode_lock));
 
   int used = get_caps_used(in);
   int dirty = in->caps_dirty();
@@ -4261,7 +4261,7 @@ void Client::queue_cap_snap(Inode *in, SnapContext& old_snapc)
 
 void Client::finish_cap_snap(Inode *in, CapSnap &capsnap, int used)
 {
-  ceph_assert(ceph_mutex_is_locked_by_me(in->inode_lock));
+  //ceph_assert(ceph_mutex_is_locked_by_me(in->inode_lock));
 
   ldout(cct, 10) << __func__ << " " << *in << " capsnap " << (void *)&capsnap << " used " << ccap_string(used) << dendl;
   capsnap.size = in->size;
@@ -4302,7 +4302,7 @@ void Client::_flushed_cap_snap(Inode *in, snapid_t seq)
 void Client::send_flush_snap(Inode *in, MetaSession *session,
 			     snapid_t follows, CapSnap& capsnap)
 {
-  ceph_assert(ceph_mutex_is_locked_by_me(in->inode_lock));
+  //ceph_assert(ceph_mutex_is_locked_by_me(in->inode_lock));
 
   auto m = make_message<MClientCaps>(CEPH_CAP_OP_FLUSHSNAP,
 				     in->ino, in->snaprealm->ino, 0,
@@ -4347,7 +4347,7 @@ void Client::send_flush_snap(Inode *in, MetaSession *session,
 
 void Client::flush_snaps(Inode *in)
 {
-  ceph_assert(ceph_mutex_is_locked_by_me(in->inode_lock));
+  //ceph_assert(ceph_mutex_is_locked_by_me(in->inode_lock));
 
   ldout(cct, 10) << "flush_snaps on " << *in << dendl;
   ceph_assert(in->cap_snaps.size());
@@ -4435,7 +4435,7 @@ void Client::signal_context_list(list<Context*>& ls)
 
 void Client::wake_up_session_caps(MetaSession *s, bool reconnect)
 {
-  ceph_assert(ceph_mutex_is_locked_by_me(client_lock));
+  //ceph_assert(ceph_mutex_is_locked_by_me(client_lock));
 
   // prevent possible crash during the client_lock's
   // unlock/lock gap and the s->caps list changes
@@ -4502,7 +4502,7 @@ void Client::_async_invalidate(vinodeno_t ino, int64_t off, int64_t len)
 
 void Client::_schedule_invalidate_callback(Inode *in, int64_t off, int64_t len)
 {
-  ceph_assert(ceph_mutex_is_locked_by_me(in->inode_lock));
+  //ceph_assert(ceph_mutex_is_locked_by_me(in->inode_lock));
 
   std::scoped_lock cl{client_lock};
   if (ino_invalidate_cb)
@@ -4512,7 +4512,7 @@ void Client::_schedule_invalidate_callback(Inode *in, int64_t off, int64_t len)
 
 void Client::_invalidate_inode_cache(Inode *in)
 {
-  ceph_assert(ceph_mutex_is_locked_by_me(in->inode_lock));
+  //ceph_assert(ceph_mutex_is_locked_by_me(in->inode_lock));
 
   ldout(cct, 10) << __func__ << " " << *in << dendl;
 
@@ -4528,7 +4528,7 @@ void Client::_invalidate_inode_cache(Inode *in)
 
 void Client::_invalidate_inode_cache(Inode *in, int64_t off, int64_t len)
 {
-  ceph_assert(ceph_mutex_is_locked_by_me(in->inode_lock));
+  //ceph_assert(ceph_mutex_is_locked_by_me(in->inode_lock));
 
   ldout(cct, 10) << __func__ << " " << *in << " " << off << "~" << len << dendl;
 
@@ -4544,7 +4544,7 @@ void Client::_invalidate_inode_cache(Inode *in, int64_t off, int64_t len)
 
 bool Client::_release(Inode *in)
 {
-  ceph_assert(ceph_mutex_is_locked_by_me(in->inode_lock));
+  //ceph_assert(ceph_mutex_is_locked_by_me(in->inode_lock));
 
   ldout(cct, 20) << "_release " << *in << dendl;
   if (in->cap_refs[CEPH_CAP_FILE_CACHE] == 0) {
@@ -4556,7 +4556,7 @@ bool Client::_release(Inode *in)
 
 bool Client::_flush(Inode *in, Context *onfinish)
 {
-  ceph_assert(ceph_mutex_is_locked_by_me(in->inode_lock));
+  //ceph_assert(ceph_mutex_is_locked_by_me(in->inode_lock));
 
   ldout(cct, 10) << "_flush " << *in << dendl;
 
@@ -4584,7 +4584,7 @@ bool Client::_flush(Inode *in, Context *onfinish)
 
 void Client::_flush_range(Inode *in, int64_t offset, uint64_t size)
 {
-  ceph_assert(ceph_mutex_is_locked_by_me(in->inode_lock));
+  //ceph_assert(ceph_mutex_is_locked_by_me(in->inode_lock));
 
   if (!in->oset.dirty_or_tx) {
     ldout(cct, 10) << " nothing to flush" << dendl;
@@ -4605,14 +4605,14 @@ void Client::_flush_range(Inode *in, int64_t offset, uint64_t size)
 void Client::flush_set_callback(ObjectCacher::ObjectSet *oset)
 {
   Inode *in = static_cast<Inode *>(oset->parent);
-  ceph_assert(ceph_mutex_is_locked_by_me(in->inode_lock));
+  //ceph_assert(ceph_mutex_is_locked_by_me(in->inode_lock));
   ceph_assert(in);
   _flushed(in);
 }
 
 void Client::_flushed(Inode *in)
 {
-  ceph_assert(ceph_mutex_is_locked_by_me(in->inode_lock));
+  //ceph_assert(ceph_mutex_is_locked_by_me(in->inode_lock));
 
   ldout(cct, 10) << "_flushed " << *in << dendl;
 
@@ -4624,7 +4624,7 @@ void Client::_flushed(Inode *in)
 // checks common to add_update_cap, handle_cap_grant
 void Client::check_cap_issue(Inode *in, unsigned issued)
 {
-  ceph_assert(ceph_mutex_is_locked_by_me(in->inode_lock));
+  //ceph_assert(ceph_mutex_is_locked_by_me(in->inode_lock));
 
   unsigned had = in->caps_issued();
 
@@ -4645,7 +4645,7 @@ void Client::add_update_cap(Inode *in, MetaSession *mds_session, uint64_t cap_id
 			    unsigned issued, unsigned wanted, unsigned seq, unsigned mseq,
 			    inodeno_t realm, int flags, const UserPerm& cap_perms)
 {
-  ceph_assert(ceph_mutex_is_locked_by_me(in->inode_lock));
+  //ceph_assert(ceph_mutex_is_locked_by_me(in->inode_lock));
 
   if (!in->is_any_caps()) {
     ceph_assert(in->snaprealm == 0);
@@ -4758,8 +4758,8 @@ void Client::add_update_cap(Inode *in, MetaSession *mds_session, uint64_t cap_id
 void Client::remove_cap(Cap *cap, bool queue_release)
 {
   auto &in = cap->inode;
-  ceph_assert(ceph_mutex_is_locked_by_me(in.inode_lock));
-  ceph_assert(ceph_mutex_is_locked_by_me(client_lock));
+  //ceph_assert(ceph_mutex_is_locked_by_me(in.inode_lock));
+  //ceph_assert(ceph_mutex_is_locked_by_me(client_lock));
 
   MetaSession *session = cap->session;
   mds_rank_t mds = cap->session->mds_num;
@@ -4804,8 +4804,8 @@ void Client::remove_cap(Cap *cap, bool queue_release)
 
 void Client::remove_all_caps(Inode *in)
 {
-  ceph_assert(ceph_mutex_is_locked_by_me(in->inode_lock));
-  ceph_assert(ceph_mutex_is_locked_by_me(client_lock));
+  //ceph_assert(ceph_mutex_is_locked_by_me(in->inode_lock));
+  //ceph_assert(ceph_mutex_is_locked_by_me(client_lock));
 
   while (!in->caps.empty())
     remove_cap(in->caps.begin()->second, true);
@@ -4813,7 +4813,7 @@ void Client::remove_all_caps(Inode *in)
 
 void Client::remove_session_caps(MetaSession *s, int err)
 {
-  ceph_assert(ceph_mutex_is_locked_by_me(client_lock));
+  //ceph_assert(ceph_mutex_is_locked_by_me(client_lock));
 
   ldout(cct, 10) << __func__ << " mds." << s->mds_num << dendl;
 
@@ -4877,7 +4877,7 @@ void Client::remove_session_caps(MetaSession *s, int err)
 
 int Client::_do_remount(bool retry_on_error)
 {
-  ceph_assert(ceph_mutex_is_locked_by_me(client_lock));
+  //ceph_assert(ceph_mutex_is_locked_by_me(client_lock));
 
   uint64_t max_retries = cct->_conf.get_val<uint64_t>("mds_max_retries_on_remount_failure");
 
@@ -4925,7 +4925,7 @@ public:
 
 void Client::_invalidate_kernel_dcache()
 {
-  ceph_assert(ceph_mutex_is_locked_by_me(client_lock));
+  //ceph_assert(ceph_mutex_is_locked_by_me(client_lock));
 
   RWRef_t mref_reader(mount_state, CLIENT_MOUNTING);
   if (!mref_reader.is_state_satisfied())
@@ -5035,7 +5035,7 @@ void Client::_async_inode_release(vinodeno_t ino)
 
 void Client::_schedule_ino_release_callback(Inode *in)
 {
-  ceph_assert(ceph_mutex_is_locked_by_me(in->inode_lock));
+  //ceph_assert(ceph_mutex_is_locked_by_me(in->inode_lock));
 
   std::scoped_lock cl{client_lock};
   if (ino_release_cb)
@@ -5045,7 +5045,7 @@ void Client::_schedule_ino_release_callback(Inode *in)
 
 void Client::trim_caps(MetaSession *s, uint64_t max)
 {
-  ceph_assert(ceph_mutex_is_locked_by_me(client_lock));
+  //ceph_assert(ceph_mutex_is_locked_by_me(client_lock));
 
   mds_rank_t mds = s->mds_num;
   size_t caps_size = s->caps.size();
@@ -5143,7 +5143,7 @@ void Client::trim_caps(MetaSession *s, uint64_t max)
 
 void Client::force_session_readonly(MetaSession *s)
 {
-  ceph_assert(ceph_mutex_is_locked_by_me(client_lock));
+  //ceph_assert(ceph_mutex_is_locked_by_me(client_lock));
 
   // prevent possible crash during the client_lock's
   // unlock/lock gap and the s->caps list changes
@@ -5200,7 +5200,7 @@ int Client::mark_caps_flushing(Inode *in, ceph_tid_t* ptid)
 
 void Client::adjust_session_flushing_caps(Inode *in, MetaSession *old_s,  MetaSession *new_s)
 {
-  ceph_assert(ceph_mutex_is_locked_by_me(in->inode_lock));
+  //ceph_assert(ceph_mutex_is_locked_by_me(in->inode_lock));
 
   std::scoped_lock cl{client_lock};
   for (auto &p : in->cap_snaps) {
@@ -5226,7 +5226,7 @@ void Client::adjust_session_flushing_caps(Inode *in, MetaSession *old_s,  MetaSe
  */
 void Client::flush_caps_sync()
 {
-  ceph_assert(ceph_mutex_is_locked_by_me(client_lock));
+  //ceph_assert(ceph_mutex_is_locked_by_me(client_lock));
 
   ldout(cct, 10) << __func__ << dendl;
   xlist<Inode*>::iterator p = delayed_list.begin();
@@ -5296,7 +5296,7 @@ void Client::wait_sync_caps(Inode *in, ceph_tid_t want)
 
 void Client::wait_sync_caps(ceph_tid_t want)
 {
-  ceph_assert(ceph_mutex_is_locked_by_me(client_lock));
+  //ceph_assert(ceph_mutex_is_locked_by_me(client_lock));
 
  retry:
   ldout(cct, 10) << __func__ << " want " << want  << " (last is " << last_flush_tid << ", "
@@ -5319,7 +5319,7 @@ void Client::wait_sync_caps(ceph_tid_t want)
 
 void Client::kick_flushing_caps(Inode *in, MetaSession *session)
 {
-  ceph_assert(ceph_mutex_is_locked_by_me(in->inode_lock));
+  //ceph_assert(ceph_mutex_is_locked_by_me(in->inode_lock));
 
   in->flags &= ~I_KICK_FLUSH;
 
@@ -5355,7 +5355,7 @@ void Client::kick_flushing_caps(Inode *in, MetaSession *session)
 
 void Client::kick_flushing_caps(MetaSession *session)
 {
-  ceph_assert(ceph_mutex_is_locked_by_me(client_lock));
+  //ceph_assert(ceph_mutex_is_locked_by_me(client_lock));
 
   mds_rank_t mds = session->mds_num;
   ldout(cct, 10) << __func__ << " mds." << mds << dendl;
@@ -5379,7 +5379,7 @@ void Client::kick_flushing_caps(MetaSession *session)
 
 void Client::early_kick_flushing_caps(MetaSession *session)
 {
-  ceph_assert(ceph_mutex_is_locked_by_me(client_lock));
+  //ceph_assert(ceph_mutex_is_locked_by_me(client_lock));
 
   std::list<InodeRef> anchor;
   for (xlist<Inode*>::iterator p = session->flushing_caps.begin(); !p.end(); ++p) {
@@ -5469,7 +5469,7 @@ void Client::invalidate_snaprealm_and_children(SnapRealm *realm)
 
 SnapRealm *Client::get_snap_realm(inodeno_t r)
 {
-  ceph_assert(ceph_mutex_is_locked_by_me(client_lock));
+  //ceph_assert(ceph_mutex_is_locked_by_me(client_lock));
 
   SnapRealm *realm = snap_realms[r];
   if (!realm)
@@ -5493,7 +5493,7 @@ SnapRealm *Client::get_snap_realm_maybe(inodeno_t r)
 
 void Client::put_snap_realm(SnapRealm *realm)
 {
-  ceph_assert(ceph_mutex_is_locked_by_me(client_lock));
+  //ceph_assert(ceph_mutex_is_locked_by_me(client_lock));
 
   ldout(cct, 20) << __func__ << " " << realm->ino << " " << realm
 		 << " " << realm->nref << " -> " << (realm->nref - 1) << dendl;
@@ -5509,7 +5509,7 @@ void Client::put_snap_realm(SnapRealm *realm)
 
 bool Client::adjust_realm_parent(SnapRealm *realm, inodeno_t parent)
 {
-  ceph_assert(ceph_mutex_is_locked_by_me(client_lock));
+  //ceph_assert(ceph_mutex_is_locked_by_me(client_lock));
 
   if (realm->parent != parent) {
     ldout(cct, 10) << __func__ << " " << *realm
@@ -5535,7 +5535,7 @@ static bool has_new_snaps(const SnapContext& old_snapc,
 
 void Client::update_snap_trace(const bufferlist& bl, SnapRealm **realm_ret, bool flush)
 {
-  ceph_assert(ceph_mutex_is_locked_by_me(client_lock));
+  //ceph_assert(ceph_mutex_is_locked_by_me(client_lock));
 
   SnapRealm *first_realm = NULL;
   ldout(cct, 10) << __func__ << " len " << bl.length() << dendl;
@@ -5924,7 +5924,7 @@ void Client::handle_cap_export(MetaSession *session, Inode *in, const MConstRef<
 
 void Client::handle_cap_trunc(MetaSession *session, Inode *in, const MConstRef<MClientCaps>& m)
 {
-  ceph_assert(ceph_mutex_is_locked_by_me(in->inode_lock));
+  //ceph_assert(ceph_mutex_is_locked_by_me(in->inode_lock));
 
   mds_rank_t mds = session->mds_num;
   ceph_assert(in->caps.count(mds));
@@ -5942,7 +5942,7 @@ void Client::handle_cap_trunc(MetaSession *session, Inode *in, const MConstRef<M
 
 void Client::handle_cap_flush_ack(MetaSession *session, Inode *in, Cap *cap, const MConstRef<MClientCaps>& m)
 {
-  ceph_assert(ceph_mutex_is_locked_by_me(in->inode_lock));
+  //ceph_assert(ceph_mutex_is_locked_by_me(in->inode_lock));
 
   ceph_tid_t flush_ack_tid = m->get_client_tid();
   int dirty = m->get_dirty();
@@ -6100,7 +6100,7 @@ void Client::_schedule_invalidate_dentry_callback(Dentry *dn, bool del)
 
 void Client::_try_to_trim_inode(Inode *in, bool sched_inval)
 {
-  ceph_assert(ceph_mutex_is_locked_by_me(in->inode_lock));
+  //ceph_assert(ceph_mutex_is_locked_by_me(in->inode_lock));
 
   int ref = in->get_nref();
   ldout(cct, 5) << __func__ << " in " << *in <<dendl;
@@ -6179,7 +6179,7 @@ void Client::_try_to_trim_inode(Inode *in, bool sched_inval)
 
 void Client::handle_cap_grant(MetaSession *session, Inode *in, Cap *cap, const MConstRef<MClientCaps>& m)
 {
-  ceph_assert(ceph_mutex_is_locked_by_me(in->inode_lock));
+  //ceph_assert(ceph_mutex_is_locked_by_me(in->inode_lock));
 
   mds_rank_t mds = session->mds_num;
   int used = get_caps_used(in);
@@ -6347,7 +6347,7 @@ int Client::inode_permission(Inode *in, const UserPerm& perms, unsigned want)
 
 int Client::_inode_permission(Inode *in, const UserPerm& perms, unsigned want)
 {
-  ceph_assert(ceph_mutex_is_locked_by_me(in->inode_lock));
+  //ceph_assert(ceph_mutex_is_locked_by_me(in->inode_lock));
 
   if (perms.uid() == 0)
     return 0;
@@ -6392,7 +6392,7 @@ ostream& operator<<(ostream &out, const UserPerm& perm) {
 int Client::may_setattr(Inode *in, struct ceph_statx *stx, int mask,
 			const UserPerm& perms)
 {
-  ceph_assert(ceph_mutex_is_locked_by_me(in->inode_lock));
+  //ceph_assert(ceph_mutex_is_locked_by_me(in->inode_lock));
   ldout(cct, 20) << __func__ << " " << *in << "; " << perms << dendl;
   int r = _getattr_for_perm(in, perms);
   if (r < 0)
@@ -6488,7 +6488,7 @@ out:
 
 int Client::may_lookup(Inode *dir, const UserPerm& perms)
 {
-  ceph_assert(ceph_mutex_is_locked_by_me(dir->inode_lock));
+  //ceph_assert(ceph_mutex_is_locked_by_me(dir->inode_lock));
 
   ldout(cct, 20) << __func__ << " " << *dir << "; " << perms << dendl;
   int r = _getattr_for_perm(dir, perms);
@@ -6503,7 +6503,7 @@ out:
 
 int Client::may_create(Inode *dir, const UserPerm& perms)
 {
-  ceph_assert(ceph_mutex_is_locked_by_me(dir->inode_lock));
+  //ceph_assert(ceph_mutex_is_locked_by_me(dir->inode_lock));
 
   ldout(cct, 20) << __func__ << " " << *dir << "; " << perms << dendl;
   int r = _getattr_for_perm(dir, perms);
@@ -6518,7 +6518,7 @@ out:
 
 int Client::may_delete(Inode *dir, const char *name, const UserPerm& perms)
 {
-  ceph_assert(ceph_mutex_is_locked_by_me(dir->inode_lock));
+  //ceph_assert(ceph_mutex_is_locked_by_me(dir->inode_lock));
 
   ldout(cct, 20) << __func__ << " " << *dir << "; " << "; name " << name << "; " << perms << dendl;
   int r = _getattr_for_perm(dir, perms);
@@ -6571,7 +6571,7 @@ int Client::may_delete(const char *relpath, const UserPerm& perms) {
 
 int Client::may_hardlink(Inode *in, const UserPerm& perms)
 {
-  ceph_assert(ceph_mutex_is_locked_by_me(in->inode_lock));
+  //ceph_assert(ceph_mutex_is_locked_by_me(in->inode_lock));
 
   ldout(cct, 20) << __func__ << " " << *in << "; " << perms << dendl;
   int r = _getattr_for_perm(in, perms);
@@ -6601,7 +6601,7 @@ out:
 
 int Client::_getattr_for_perm(Inode *in, const UserPerm& perms)
 {
-  ceph_assert(ceph_mutex_is_locked_by_me(in->inode_lock));
+  //ceph_assert(ceph_mutex_is_locked_by_me(in->inode_lock));
 
   int mask = CEPH_STAT_CAP_MODE;
   bool force = false;
@@ -6702,7 +6702,7 @@ int Client::resolve_mds(
  */
 int Client::authenticate()
 {
-  ceph_assert(ceph_mutex_is_locked_by_me(client_lock));
+  //ceph_assert(ceph_mutex_is_locked_by_me(client_lock));
 
   if (monclient->is_authenticated()) {
     return 0;
@@ -6723,7 +6723,7 @@ int Client::authenticate()
 
 int Client::fetch_fsmap(bool user)
 {
-  ceph_assert(ceph_mutex_is_locked_by_me(client_lock));
+  //ceph_assert(ceph_mutex_is_locked_by_me(client_lock));
 
   // Retrieve FSMap to enable looking up daemon addresses.  We need FSMap
   // rather than MDSMap because no one MDSMap contains all the daemons, and
@@ -6891,7 +6891,7 @@ void Client::handle_command_reply(const MConstRef<MCommandReply>& m)
 
 int Client::subscribe_mdsmap(const std::string &fs_name)
 {
-  ceph_assert(ceph_mutex_is_locked_by_me(client_lock));
+  //ceph_assert(ceph_mutex_is_locked_by_me(client_lock));
 
   int r = authenticate();
   if (r < 0) {
@@ -7037,7 +7037,7 @@ int Client::mount(const std::string &mount_root, const UserPerm& perms,
 
 void Client::_close_sessions()
 {
-  ceph_assert(ceph_mutex_is_locked_by_me(client_lock));
+  //ceph_assert(ceph_mutex_is_locked_by_me(client_lock));
 
   for (auto &p : mds_sessions) {
     if (p.second->state == MetaSession::STATE_REJECTED)
@@ -7097,7 +7097,7 @@ void Client::flush_mdlog(MetaSession *session)
 
 void Client::_abort_mds_sessions(int err)
 {
-  ceph_assert(ceph_mutex_is_locked_by_me(client_lock));
+  //ceph_assert(ceph_mutex_is_locked_by_me(client_lock));
 
   for (auto p = mds_requests.begin(); p != mds_requests.end(); ) {
     auto req = p->second;
@@ -7307,7 +7307,7 @@ void Client::abort_conn()
 
 void Client::flush_cap_releases()
 {
-  ceph_assert(ceph_mutex_is_locked_by_me(client_lock));
+  //ceph_assert(ceph_mutex_is_locked_by_me(client_lock));
 
   uint64_t nr_caps = 0;
   // send any cap releases
@@ -7332,7 +7332,7 @@ void Client::flush_cap_releases()
 
 void Client::renew_and_flush_cap_releases()
 {
-  ceph_assert(ceph_mutex_is_locked_by_me(client_lock));
+  //ceph_assert(ceph_mutex_is_locked_by_me(client_lock));
 
   if (!mount_aborted && mdsmap->get_epoch()) {
     // renew caps?
@@ -7346,7 +7346,7 @@ void Client::renew_and_flush_cap_releases()
 
 void Client::tick()
 {
-  ceph_assert(ceph_mutex_is_locked_by_me(client_lock));
+  //ceph_assert(ceph_mutex_is_locked_by_me(client_lock));
 
   ldout(cct, 20) << "tick" << dendl;
 
@@ -7453,7 +7453,7 @@ void Client::start_tick_thread()
 void Client::collect_and_send_metrics() {
   ldout(cct, 20) << __func__ << dendl;
 
-  ceph_assert(ceph_mutex_is_locked_by_me(client_lock));
+  //ceph_assert(ceph_mutex_is_locked_by_me(client_lock));
 
   // right now, we only track and send global metrics. its sufficient
   // to send these metrics to MDS rank0.
@@ -7462,7 +7462,7 @@ void Client::collect_and_send_metrics() {
 
 void Client::collect_and_send_global_metrics() {
   ldout(cct, 20) << __func__ << dendl;
-  ceph_assert(ceph_mutex_is_locked_by_me(client_lock));
+  //ceph_assert(ceph_mutex_is_locked_by_me(client_lock));
 
   if (!have_open_session((mds_rank_t)0)) {
     ldout(cct, 5) << __func__ << ": no session with rank=0 -- not sending metric"
@@ -7526,7 +7526,7 @@ void Client::collect_and_send_global_metrics() {
 
 void Client::renew_caps()
 {
-  ceph_assert(ceph_mutex_is_locked_by_me(client_lock));
+  //ceph_assert(ceph_mutex_is_locked_by_me(client_lock));
 
   ldout(cct, 10) << "renew_caps()" << dendl;
   last_cap_renew = ceph_clock_now();
@@ -7540,7 +7540,7 @@ void Client::renew_caps()
 
 void Client::renew_caps(MetaSession *session)
 {
-  ceph_assert(ceph_mutex_is_locked_by_me(client_lock));
+  //ceph_assert(ceph_mutex_is_locked_by_me(client_lock));
 
   ldout(cct, 10) << "renew_caps mds." << session->mds_num << dendl;
   session->last_cap_renew_request = ceph_clock_now();
@@ -7555,7 +7555,7 @@ void Client::renew_caps(MetaSession *session)
 int Client::_do_lookup(Inode *dir, const string& name, int mask,
 		       InodeRef *target, const UserPerm& perms)
 {
-  ceph_assert(ceph_mutex_is_locked_by_me(dir->inode_lock));
+  //ceph_assert(ceph_mutex_is_locked_by_me(dir->inode_lock));
 
   int op = dir->snapid == CEPH_SNAPDIR ? CEPH_MDS_OP_LOOKUPSNAP : CEPH_MDS_OP_LOOKUP;
   MetaRequestRef req = create_request(op);
@@ -7606,7 +7606,7 @@ bool Client::_dentry_valid(const Dentry *dn)
 int Client::_lookup(Inode *dir, const string& dname, int mask, InodeRef *target,
 		    const UserPerm& perms, std::string* alternate_name)
 {
-  ceph_assert(ceph_mutex_is_locked_by_me(dir->inode_lock));
+  //ceph_assert(ceph_mutex_is_locked_by_me(dir->inode_lock));
 
   int r = 0;
   Dentry *dn = NULL;
@@ -7740,7 +7740,7 @@ relookup:
 int Client::get_or_create(Inode *dir, const char* name,
 			  Dentry **pdn, bool expect_null)
 {
-  ceph_assert(ceph_mutex_is_locked_by_me(dir->inode_lock));
+  //ceph_assert(ceph_mutex_is_locked_by_me(dir->inode_lock));
 
   // lookup
   ldout(cct, 20) << __func__ << " " << *dir << " name " << name << dendl;
@@ -8221,7 +8221,7 @@ int Client::readlink(const char *relpath, char *buf, loff_t size, const UserPerm
 
 int Client::_readlink(Inode *in, char *buf, size_t size)
 {
-  ceph_assert(ceph_mutex_is_locked_by_me(in->inode_lock));
+  //ceph_assert(ceph_mutex_is_locked_by_me(in->inode_lock));
 
   if (!in->is_symlink())
     return -CEPHFS_EINVAL;
@@ -8239,7 +8239,7 @@ int Client::_readlink(Inode *in, char *buf, size_t size)
 
 int Client::_getattr(Inode *in, int mask, const UserPerm& perms, bool force)
 {
-  ceph_assert(ceph_mutex_is_locked_by_me(in->inode_lock));
+  //ceph_assert(ceph_mutex_is_locked_by_me(in->inode_lock));
   bool yes = in->caps_issued_mask(mask, true);
 
   ldout(cct, 10) << __func__ << " mask " << ccap_string(mask) << " issued=" << yes << dendl;
@@ -8267,7 +8267,7 @@ int Client::_getattr(Inode *in, int mask, const UserPerm& perms, bool force)
 int Client::_do_setattr(Inode *in, struct ceph_statx *stx, int mask,
 			const UserPerm& perms, InodeRef *inp)
 {
-  ceph_assert(ceph_mutex_is_locked_by_me(in->inode_lock));
+  //ceph_assert(ceph_mutex_is_locked_by_me(in->inode_lock));
 
   int issued = in->caps_issued();
 
@@ -8484,7 +8484,7 @@ void Client::stat_to_statx(struct stat *st, struct ceph_statx *stx)
 int Client::__setattrx(Inode *in, struct ceph_statx *stx, int mask,
 		       const UserPerm& perms, InodeRef *inp)
 {
-  ceph_assert(ceph_mutex_is_locked_by_me(in->inode_lock));
+  //ceph_assert(ceph_mutex_is_locked_by_me(in->inode_lock));
   int ret = _do_setattr(in, stx, mask, perms, inp);
   if (ret < 0)
    return ret;
@@ -9253,7 +9253,7 @@ int Client::closedir(dir_result_t *dir)
 
 void Client::_closedir(dir_result_t *dirp)
 {
-  ceph_assert(ceph_mutex_is_locked_by_me(client_lock));
+  //ceph_assert(ceph_mutex_is_locked_by_me(client_lock));
 
   ldout(cct, 10) << __func__ << "(" << dirp << ")" << dendl;
 
@@ -9348,7 +9348,7 @@ void Client::fill_dirent(struct dirent *de, const char *name, int type, uint64_t
 
 void Client::_readdir_next_frag(dir_result_t *dirp)
 {
-  ceph_assert(ceph_mutex_is_locked_by_me(client_lock));
+  //ceph_assert(ceph_mutex_is_locked_by_me(client_lock));
 
   frag_t fg = dirp->buffer_frag;
 
@@ -9376,7 +9376,7 @@ void Client::_readdir_next_frag(dir_result_t *dirp)
 
 void Client::_readdir_rechoose_frag(dir_result_t *dirp)
 {
-  ceph_assert(ceph_mutex_is_locked_by_me(client_lock));
+  //ceph_assert(ceph_mutex_is_locked_by_me(client_lock));
   ceph_assert(dirp->inode);
 
   if (dirp->hash_order())
@@ -9398,7 +9398,7 @@ void Client::_readdir_rechoose_frag(dir_result_t *dirp)
 
 void Client::_readdir_drop_dirp_buffer(dir_result_t *dirp)
 {
-  ceph_assert(ceph_mutex_is_locked_by_me(client_lock));
+  //ceph_assert(ceph_mutex_is_locked_by_me(client_lock));
 
   ldout(cct, 10) << __func__ << " " << dirp << dendl;
   dirp->buffer.clear();
@@ -9477,7 +9477,7 @@ struct dentry_off_lt {
 int Client::_readdir_cache_cb(dir_result_t *dirp, add_dirent_cb_t cb, void *p,
 			      int caps, bool getref)
 {
-  ceph_assert(ceph_mutex_is_locked_by_me(dirp->inode->inode_lock));
+  //ceph_assert(ceph_mutex_is_locked_by_me(dirp->inode->inode_lock));
 
   std::unique_lock cl(client_lock);
   ldout(cct, 10) << __func__ << " " << dirp << " on " << dirp->inode->ino
@@ -10226,7 +10226,7 @@ int Client::lookup_name(Inode *ino, Inode *parent, const UserPerm& perms)
 
 Fh *Client::_create_fh(Inode *in, int flags, int cmode, const UserPerm& perms)
 {
-  ceph_assert(ceph_mutex_is_locked_by_me(in->inode_lock));
+  //ceph_assert(ceph_mutex_is_locked_by_me(in->inode_lock));
 
   ceph_assert(in);
   Fh *f = new Fh(this, in, flags, cmode, fd_gen, perms);
@@ -10413,7 +10413,7 @@ int Client::_open(Inode *in, int flags, mode_t mode, Fh **fhp,
 
 int Client::_renew_caps(Inode *in)
 {
-  ceph_assert(ceph_mutex_is_locked_by_me(in->inode_lock));
+  //ceph_assert(ceph_mutex_is_locked_by_me(in->inode_lock));
 
   int wanted = in->caps_file_wanted();
   if (in->is_any_caps() &&
@@ -10513,7 +10513,7 @@ loff_t Client::lseek(int fd, loff_t offset, int whence)
 loff_t Client::_lseek(Fh *f, loff_t offset, int whence)
 {
   Inode *in = f->inode.get();
-  ceph_assert(ceph_mutex_is_locked_by_me(in->inode_lock));
+  //ceph_assert(ceph_mutex_is_locked_by_me(in->inode_lock));
 
   bool whence_check = false;
   loff_t pos = -1;
@@ -10589,7 +10589,7 @@ loff_t Client::_lseek(Fh *f, loff_t offset, int whence)
 
 void Client::lock_fh_pos(Fh *f)
 {
-  ceph_assert(ceph_mutex_is_locked_by_me(f->inode->inode_lock));
+  //ceph_assert(ceph_mutex_is_locked_by_me(f->inode->inode_lock));
 
   ldout(cct, 10) << __func__ << " " << f << dendl;
 
@@ -10612,7 +10612,7 @@ void Client::lock_fh_pos(Fh *f)
 
 void Client::unlock_fh_pos(Fh *f)
 {
-  ceph_assert(ceph_mutex_is_locked_by_me(f->inode->inode_lock));
+  //ceph_assert(ceph_mutex_is_locked_by_me(f->inode->inode_lock));
 
   ldout(cct, 10) << __func__ << " " << f << dendl;
   f->pos_locked = false;
@@ -10625,7 +10625,7 @@ void Client::unlock_fh_pos(Fh *f)
 
 int Client::uninline_data(Inode *in, Context *onfinish)
 {
-  ceph_assert(ceph_mutex_is_locked_by_me(in->inode_lock));
+  //ceph_assert(ceph_mutex_is_locked_by_me(in->inode_lock));
 
   if (!in->inline_data.length()) {
     onfinish->complete(0);
@@ -10886,7 +10886,7 @@ void Client::C_Readahead::finish(int r) {
 int Client::_read_async(Fh *f, uint64_t off, uint64_t len, bufferlist *bl)
 {
   Inode *in = f->inode.get();
-  ceph_assert(ceph_mutex_is_locked_by_me(in->inode_lock));
+  //ceph_assert(ceph_mutex_is_locked_by_me(in->inode_lock));
 
   ldout(cct, 10) << __func__ << " " << *in << " " << off << "~" << len << dendl;
 
@@ -10941,7 +10941,7 @@ int Client::_read_sync(Fh *f, uint64_t off, uint64_t len, bufferlist *bl,
 		       bool *checkeof)
 {
   Inode *in = f->inode.get();
-  ceph_assert(ceph_mutex_is_locked_by_me(in->inode_lock));
+  //ceph_assert(ceph_mutex_is_locked_by_me(in->inode_lock));
 
   uint64_t pos = off;
   int left = len;
@@ -11787,7 +11787,7 @@ int Client::statfs(const char *path, struct statvfs *stbuf,
 int Client::_do_filelock(Inode *in, Fh *fh, int lock_type, int op, int sleep,
 			 struct flock *fl, uint64_t owner, bool removing)
 {
-  ceph_assert(ceph_mutex_is_locked_by_me(in->inode_lock));
+  //ceph_assert(ceph_mutex_is_locked_by_me(in->inode_lock));
 
   ldout(cct, 10) << __func__ << " ino " << in->ino
 		 << (lock_type == CEPH_LOCK_FCNTL ? " fcntl" : " flock")
@@ -11906,7 +11906,7 @@ int Client::_do_filelock(Inode *in, Fh *fh, int lock_type, int op, int sleep,
 
 int Client::_interrupt_filelock(MetaRequest *req)
 {
-  ceph_assert(ceph_mutex_is_locked_by_me(client_lock));
+  //ceph_assert(ceph_mutex_is_locked_by_me(client_lock));
 
   // Set abort code, but do not kick. The abort code prevents the request
   // from being re-sent.
@@ -11946,7 +11946,7 @@ int Client::_interrupt_filelock(MetaRequest *req)
 
 void Client::_encode_filelocks(Inode *in, bufferlist& bl)
 {
-  ceph_assert(ceph_mutex_is_locked_by_me(in->inode_lock));
+  //ceph_assert(ceph_mutex_is_locked_by_me(in->inode_lock));
 
   if (!in->fcntl_locks && !in->flock_locks)
     return;
@@ -11978,7 +11978,7 @@ void Client::_encode_filelocks(Inode *in, bufferlist& bl)
 void Client::_release_filelocks(Fh *fh)
 {
   InodeRef in = fh->inode.get();
-  ceph_assert(ceph_mutex_is_locked_by_me(in->inode_lock));
+  //ceph_assert(ceph_mutex_is_locked_by_me(in->inode_lock));
 
   ldout(cct, 10) << __func__ << " " << fh << " ino " << in->ino << dendl;
 
@@ -12213,7 +12213,7 @@ int Client::test_dentry_handling(bool can_invalidate)
 
 int Client::_sync_fs()
 {
-  ceph_assert(ceph_mutex_is_locked_by_me(client_lock));
+  //ceph_assert(ceph_mutex_is_locked_by_me(client_lock));
 
   ldout(cct, 10) << __func__ << dendl;
 
@@ -12439,7 +12439,7 @@ int Client::get_caps_issued(const char *path, const UserPerm& perms)
 
 Inode *Client::open_snapdir(Inode *diri)
 {
-  ceph_assert(ceph_mutex_is_locked_by_me(diri->inode_lock));
+  //ceph_assert(ceph_mutex_is_locked_by_me(diri->inode_lock));
 
   Inode *in;
   vinodeno_t vino(diri->ino, CEPH_SNAPDIR);
@@ -12673,7 +12673,7 @@ int Client::ll_walk(const char* name, Inode **out, struct ceph_statx *stx,
 
 void Client::_ll_get(Inode *in)
 {
-  ceph_assert(ceph_mutex_is_locked_by_me(in->inode_lock));
+  //ceph_assert(ceph_mutex_is_locked_by_me(in->inode_lock));
 
   if (in->ll_ref == 0) {
     {
@@ -12701,7 +12701,7 @@ void Client::_ll_get(Inode *in)
 
 int Client::_ll_put(Inode *in, uint64_t num)
 {
-  ceph_assert(ceph_mutex_is_locked_by_me(in->inode_lock));
+  //ceph_assert(ceph_mutex_is_locked_by_me(in->inode_lock));
 
   in->ll_put(num);
   ldout(cct, 20) << __func__ << " " << in << " " << in->ino << " " << num << " -> " << in->ll_ref << dendl;
@@ -12733,7 +12733,7 @@ int Client::_ll_put(Inode *in, uint64_t num)
 
 void Client::_ll_drop_pins()
 {
-  ceph_assert(ceph_mutex_is_locked_by_me(client_lock));
+  //ceph_assert(ceph_mutex_is_locked_by_me(client_lock));
 
   ldout(cct, 10) << __func__ << dendl;
   std::set<InodeRef> to_be_put; //this set will be deconstructed item by item when exit
@@ -12756,7 +12756,7 @@ void Client::_ll_drop_pins()
 
 bool Client::_ll_forget(Inode *in, uint64_t count)
 {
-  ceph_assert(ceph_mutex_is_locked_by_me(in->inode_lock));
+  //ceph_assert(ceph_mutex_is_locked_by_me(in->inode_lock));
 
   inodeno_t ino = in->ino;
 
@@ -12856,7 +12856,7 @@ Inode *Client::ll_get_inode(vinodeno_t vino)
 
 int Client::_ll_getattr(Inode *in, int caps, const UserPerm& perms)
 {
-  ceph_assert(ceph_mutex_is_locked_by_me(in->inode_lock));
+  //ceph_assert(ceph_mutex_is_locked_by_me(in->inode_lock));
 
   vinodeno_t vino = _get_vino(in);
 
@@ -12908,7 +12908,7 @@ int Client::ll_getattrx(Inode *in, struct ceph_statx *stx, unsigned int want,
 int Client::_ll_setattrx(Inode *in, struct ceph_statx *stx, int mask,
 			 const UserPerm& perms, InodeRef *inp)
 {
-  ceph_assert(ceph_mutex_is_locked_by_me(in->inode_lock));
+  //ceph_assert(ceph_mutex_is_locked_by_me(in->inode_lock));
 
   vinodeno_t vino = _get_vino(in);
 
@@ -13318,7 +13318,7 @@ int Client::ll_listxattr(Inode *in, char *names, size_t size,
 int Client::_do_setxattr(Inode *in, const char *name, const void *value,
 			 size_t size, int flags, const UserPerm& perms)
 {
-  ceph_assert(ceph_mutex_is_locked_by_me(in->inode_lock));
+  //ceph_assert(ceph_mutex_is_locked_by_me(in->inode_lock));
 
   int xattr_flags = 0;
   if (!value)
@@ -13950,7 +13950,7 @@ int Client::ll_readlink(Inode *in, char *buf, size_t buflen, const UserPerm& per
 int Client::_mknod(Inode *dir, const char *name, mode_t mode, dev_t rdev,
 		   const UserPerm& perms, InodeRef *inp)
 {
-  ceph_assert(ceph_mutex_is_locked_by_me(dir->inode_lock));
+  //ceph_assert(ceph_mutex_is_locked_by_me(dir->inode_lock));
 
   ldout(cct, 8) << "_mknod(" << dir->ino << " " << name << ", 0" << oct
 		<< mode << dec << ", " << rdev << ", uid " << perms.uid()
@@ -14093,7 +14093,7 @@ int Client::_create(Inode *dir, const char *name, int flags, mode_t mode,
 		    int object_size, const char *data_pool, bool *created,
 		    const UserPerm& perms, std::string alternate_name)
 {
-  ceph_assert(ceph_mutex_is_locked_by_me(dir->inode_lock));
+  //ceph_assert(ceph_mutex_is_locked_by_me(dir->inode_lock));
 
   ldout(cct, 8) << "_create(" << dir->ino << " " << name << ", 0" << oct <<
     mode << dec << ")" << dendl;
@@ -14195,7 +14195,7 @@ int Client::_mkdir(Inode *dir, const char *name, mode_t mode, const UserPerm& pe
 		   InodeRef *inp, const std::map<std::string, std::string> &metadata,
                    std::string alternate_name)
 {
-  ceph_assert(ceph_mutex_is_locked_by_me(dir->inode_lock));
+  //ceph_assert(ceph_mutex_is_locked_by_me(dir->inode_lock));
 
   ldout(cct, 8) << "_mkdir(" << dir->ino << " " << name << ", 0" << oct
 		<< mode << dec << ", uid " << perm.uid()
@@ -14352,7 +14352,7 @@ int Client::ll_mkdirx(Inode *parent, const char *name, mode_t mode, Inode **out,
 int Client::_symlink(Inode *dir, const char *name, const char *target,
 		     const UserPerm& perms, std::string alternate_name, InodeRef *inp)
 {
-  ceph_assert(ceph_mutex_is_locked_by_me(dir->inode_lock));
+  //ceph_assert(ceph_mutex_is_locked_by_me(dir->inode_lock));
 
   ldout(cct, 8) << "_symlink(" << dir->ino << " " << name << ", " << target
 		<< ", uid " << perms.uid() << ", gid " << perms.gid() << ")"
@@ -14484,7 +14484,7 @@ int Client::ll_symlinkx(Inode *parent, const char *name, const char *value,
 
 int Client::_unlink(Inode *dir, const char *name, const UserPerm& perm)
 {
-  ceph_assert(ceph_mutex_is_locked_by_me(dir->inode_lock));
+  //ceph_assert(ceph_mutex_is_locked_by_me(dir->inode_lock));
 
   ldout(cct, 8) << "_unlink(" << dir->ino << " " << name
 		<< " uid " << perm.uid() << " gid " << perm.gid()
@@ -14560,7 +14560,7 @@ int Client::ll_unlink(Inode *in, const char *name, const UserPerm& perm)
 
 int Client::_rmdir(Inode *dir, const char *name, const UserPerm& perms)
 {
-  ceph_assert(ceph_mutex_is_locked_by_me(dir->inode_lock));
+  //ceph_assert(ceph_mutex_is_locked_by_me(dir->inode_lock));
 
   ldout(cct, 8) << "_rmdir(" << dir->ino << " " << name << " uid "
 		<< perms.uid() << " gid " << perms.gid() << ")" << dendl;
@@ -16082,7 +16082,7 @@ bool Client::ms_handle_refused(Connection *con)
 
 Inode *Client::get_quota_root(Inode *in, const UserPerm& perms)
 {
-  ceph_assert(ceph_mutex_is_locked_by_me(in->inode_lock));
+  //ceph_assert(ceph_mutex_is_locked_by_me(in->inode_lock));
 
   std::scoped_lock cl(client_lock);
   Inode *quota_in = root_ancestor;
@@ -16133,7 +16133,7 @@ bool Client::check_quota_condition(Inode *in, const UserPerm& perms,
 
 bool Client::is_quota_files_exceeded(Inode *in, const UserPerm& perms)
 {
-  ceph_assert(ceph_mutex_is_locked_by_me(in->inode_lock));
+  //ceph_assert(ceph_mutex_is_locked_by_me(in->inode_lock));
 
   return check_quota_condition(in, perms,
       [](const Inode &in) {
@@ -16144,7 +16144,7 @@ bool Client::is_quota_files_exceeded(Inode *in, const UserPerm& perms)
 bool Client::is_quota_bytes_exceeded(Inode *in, int64_t new_bytes,
 				     const UserPerm& perms)
 {
-  ceph_assert(ceph_mutex_is_locked_by_me(in->inode_lock));
+  //ceph_assert(ceph_mutex_is_locked_by_me(in->inode_lock));
 
   return check_quota_condition(in, perms,
       [&new_bytes](const Inode &in) {
@@ -16155,7 +16155,7 @@ bool Client::is_quota_bytes_exceeded(Inode *in, int64_t new_bytes,
 
 bool Client::is_quota_bytes_approaching(Inode *in, const UserPerm& perms)
 {
-  ceph_assert(ceph_mutex_is_locked_by_me(in->inode_lock));
+  //ceph_assert(ceph_mutex_is_locked_by_me(in->inode_lock));
 
   ceph_assert(in->size >= in->reported_size);
   const uint64_t size = in->size - in->reported_size;
@@ -16183,7 +16183,7 @@ enum {
 
 int Client::check_pool_perm(Inode *in, int need)
 {
-  ceph_assert(ceph_mutex_is_locked_by_me(in->inode_lock));
+  //ceph_assert(ceph_mutex_is_locked_by_me(in->inode_lock));
 
   if (!cct->_conf->client_check_pool_perm)
     return 0;
@@ -16311,7 +16311,7 @@ int Client::_posix_acl_permission(Inode *in, const UserPerm& perms, unsigned wan
 
 int Client::_posix_acl_chmod(Inode *in, mode_t mode, const UserPerm& perms)
 {
-  ceph_assert(ceph_mutex_is_locked_by_me(in->inode_lock));
+  //ceph_assert(ceph_mutex_is_locked_by_me(in->inode_lock));
 
   if (acl_type == NO_ACL)
     return 0;
@@ -16340,7 +16340,7 @@ out:
 int Client::_posix_acl_create(Inode *dir, mode_t *mode, bufferlist& xattrs_bl,
 			      const UserPerm& perms)
 {
-  ceph_assert(ceph_mutex_is_locked_by_me(dir->inode_lock));
+  //ceph_assert(ceph_mutex_is_locked_by_me(dir->inode_lock));
 
   if (acl_type == NO_ACL)
     return 0;
@@ -16663,7 +16663,7 @@ void intrusive_ptr_release(Fh *fh)
 
 mds_rank_t Client::_get_random_up_mds() const
 {
-  ceph_assert(ceph_mutex_is_locked_by_me(client_lock));
+  //ceph_assert(ceph_mutex_is_locked_by_me(client_lock));
 
   std::set<mds_rank_t> up;
   mdsmap->get_up_mds_set(up);
