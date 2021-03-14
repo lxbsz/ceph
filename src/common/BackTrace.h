@@ -10,6 +10,7 @@
 #include <execinfo.h>
 #endif
 #include <stdlib.h>
+#include <string.h>
 
 namespace ceph {
 
@@ -20,18 +21,33 @@ struct BackTrace {
 
   int skip;
   void *array[max]{};
-  size_t size;
-  char **strings;
+  size_t size = 0;
+  char **strings = nullptr;
 
-  explicit BackTrace(int s) : skip(s) {
+private:
+  void init(void) {
 #ifdef HAVE_EXECINFO_H
     size = backtrace(array, max);
     strings = backtrace_symbols(array, size);
 #else
     skip = 0;
-    size = 0;
-    strings = nullptr;
 #endif
+  }
+
+public:
+  void free_strings(void) {
+    free(strings);
+    strings = nullptr;
+  }
+  void renew(void) {
+    free(strings);
+    strings = nullptr;
+    memset(array, 0, max * sizeof(void*));
+    init();
+  }
+
+  explicit BackTrace(int s) : skip(s) {
+    init();
   }
   ~BackTrace() {
     free(strings);
