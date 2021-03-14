@@ -111,6 +111,8 @@ class ObjectCacher {
     static const int STATE_RX = 4;
     static const int STATE_TX = 5;
     static const int STATE_ERROR = 6; // a read error occurred
+    // already remove from the objects
+    static const int STATE_REMOVED = 7;
 
   private:
     // my fields
@@ -168,6 +170,7 @@ class ObjectCacher {
     bool is_tx() const { return state == STATE_TX; }
     bool is_rx() const { return state == STATE_RX; }
     bool is_error() const { return state == STATE_ERROR; }
+    bool is_removed() const { return state == STATE_REMOVED; }
 
     // reference counting
     int bget() {

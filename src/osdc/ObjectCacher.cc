@@ -3007,6 +3007,12 @@ void ObjectCacher::bh_remove(Object *ob, BufferHead *bh, bool delete_bh)
   ceph_assert(bh->get_journal_tid() == 0);
   ldout(cct, 30) << "bh_remove " << *ob << " " << *bh << dendl;
 
+  // this could happed in the trim() when just after the bh is
+  // held by the BufferHeadRef and before acquired the oset lock
+  // the bh was removed.
+  if (bh->is_removed())
+    return;
+
   std::scoped_lock ocl{oc_lock};
   ob->remove_bh(bh);
   if (bh->is_dirty()) {
@@ -3023,6 +3029,7 @@ void ObjectCacher::bh_remove(Object *ob, BufferHead *bh, bool delete_bh)
   if (get_stat_dirty_waiting() > 0)
     stat_cond.notify_all();
 
+  bh->set_state(BufferHead::STATE_REMOVED);
   if (delete_bh)
     bh->put();
 }
