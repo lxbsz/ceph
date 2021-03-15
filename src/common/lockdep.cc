@@ -40,11 +40,11 @@ static std::map<int, int> lock_refs;
 static constexpr size_t MAX_LOCKS = 128 * 1024;   // increase me as needed
 static std::bitset<MAX_LOCKS> free_ids; // bit set = free
 static ceph::unordered_map<pthread_t, std::map<int,ceph::BackTrace*> > held;
-static constexpr size_t NR_LOCKS = 4096; // the initial number of locks
+static constexpr size_t NR_LOCKS = 8192; // the initial number of locks
 static std::vector<std::bitset<MAX_LOCKS>> follows(NR_LOCKS); // follows[a][b] means b taken after a
 static std::vector<std::map<int,ceph::BackTrace *>> follows_bt(NR_LOCKS);
 std::list<ceph::BackTrace*> bt_free_list;
-static constexpr size_t BT_FREE_MAX = 128;
+static constexpr size_t BT_FREE_MAX = 10240;
 // upper bound of lock id
 unsigned current_maxid;
 int last_freed_id = -1;
