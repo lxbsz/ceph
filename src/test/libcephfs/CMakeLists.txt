@@ -1,15 +1,6 @@
 if(${WITH_CEPHFS})
   add_executable(ceph_test_libcephfs
-    test.cc
-    readdir_r_cb.cc
-    caps.cc
-    multiclient.cc
-    flock.cc
-    recordlock.cc
-    acl.cc
-    main.cc
-    deleg.cc
-    monconfig.cc
+    test_back_trace.cc
   )
   target_link_libraries(ceph_test_libcephfs
     ceph-common
