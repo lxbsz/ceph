@@ -1273,6 +1273,62 @@ TEST(LibCephFS, Rename) {
   ceph_shutdown(cmount);
 }
 
+TEST(LibCephFS, RenameLock) {
+  struct ceph_mount_info *cmount;
+  ASSERT_EQ(ceph_create(&cmount, NULL), 0);
+  ASSERT_EQ(ceph_conf_read_file(cmount, NULL), 0);
+  ASSERT_EQ(0, ceph_conf_parse_env(cmount, NULL));
+  ASSERT_EQ(ceph_mount(cmount, NULL), 0);
+
+  int mypid = getpid();
+  char path_src[256];
+  char path_dst[256];
+
+  sprintf(path_src, "test_rename_lock_%d/a/b/c/d/e", mypid);
+  EXPECT_EQ(0, ceph_mkdirs(cmount, path_src, 0755));
+
+  /* rename to its ancester to make sure no deadlock */
+  sprintf(path_dst, "test_rename_lock_%d/a/b", mypid);
+  ASSERT_EQ(-ENOTEMPTY, ceph_rename(cmount, path_src, path_dst));
+
+  /* rename with "." and ".." to make sure no deadlock */
+  sprintf(path_src, "test_rename_lock_%d/a/b/c/d/.", mypid);
+  ASSERT_EQ(-EBUSY, ceph_rename(cmount, path_src, path_dst));
+  sprintf(path_src, "test_rename_lock_%d/a/b/c/d/..", mypid);
+  ASSERT_EQ(-EBUSY, ceph_rename(cmount, path_src, path_dst));
+
+  sprintf(path_src, "test_rename_lock_%d/a/b/c/d/e", mypid);
+  sprintf(path_dst, "test_rename_lock_%d/a/b/c/d/.", mypid);
+  ASSERT_EQ(-EBUSY, ceph_rename(cmount, path_src, path_dst));
+  sprintf(path_src, "test_rename_lock_%d/a/b/c/d/.", mypid);
+  sprintf(path_dst, "test_rename_lock_%d/a/b/c/d/e", mypid);
+  ASSERT_EQ(-EBUSY, ceph_rename(cmount, path_src, path_dst));
+  sprintf(path_src, "test_rename_lock_%d/a/b/c/d/e", mypid);
+  sprintf(path_dst, "test_rename_lock_%d/a/b/c/d/..", mypid);
+  ASSERT_EQ(-EBUSY, ceph_rename(cmount, path_src, path_dst));
+  sprintf(path_src, "test_rename_lock_%d/a/b/c/d/..", mypid);
+  sprintf(path_dst, "test_rename_lock_%d/a/b/c/d/e", mypid);
+  ASSERT_EQ(-EBUSY, ceph_rename(cmount, path_src, path_dst));
+
+  /* rename to its descendant to make sure no deadlock */
+  sprintf(path_src, "test_rename_lock_%d/a/b", mypid);
+  sprintf(path_dst, "test_rename_lock_%d/a/b/c/d/e", mypid);
+  ASSERT_EQ(-EINVAL, ceph_rename(cmount, path_src, path_dst));
+
+  /* rename to its descendant to make sure no deadlock */
+  sprintf(path_src, "test_rename_lock_%d/a/b", mypid);
+  sprintf(path_dst, "test_rename_lock_%d/a/b/c/d/e/f", mypid);
+  ASSERT_EQ(-EINVAL, ceph_rename(cmount, path_src, path_dst));
+
+  /* rename in the same directory to make sure no deadlock */
+  sprintf(path_src, "test_rename_lock_%d/a/b/c/d/e", mypid);
+  sprintf(path_dst, "test_rename_lock_%d/a/b/c/d/f", mypid);
+  ASSERT_EQ(0, ceph_rename(cmount, path_src, path_dst));
+  ASSERT_EQ(-EISDIR, ceph_unlink(cmount, path_dst));
+
+  ceph_shutdown(cmount);
+}
+
 TEST(LibCephFS, UseUnmounted) {
   struct ceph_mount_info *cmount;
   ASSERT_EQ(ceph_create(&cmount, NULL), 0);

@@ -1598,7 +1598,7 @@ Inode* Client::insert_trace(MetaRequest *request, MetaSession *session)
       if (dlease.duration_ms > 0) {
 	if (!dn) {
 	  Dir *dir = diri->open_dir();
-	  dn = link(dir, dname, NULL, NULL);
+	  dn = _add_dentry(dir, dname);
 	}
 	update_dentry_lease(dn, &dlease, request->sent_stamp, session);
       }
@@ -3576,6 +3576,19 @@ void Client::close_dir(Dir *dir)
   put_inode(in);               // unpin inode
 }
 
+Dentry* Client::_add_dentry(Dir *dir, const string& name)
+{
+  ceph_assert(ceph_mutex_is_locked_by_me(dir->inode_lock));
+
+  // create a new Dentry
+  Dentry *dn = new Dentry(dir, name);
+
+  std::scoped_lock cl(client_lock);
+  lru.lru_insert_mid(dn);    // mid or top?
+
+  return dn;
+}
+
   /**
    * Don't call this with in==NULL, use get_or_create for that
    * leave dn set to default NULL unless you're trying to add
@@ -3586,14 +3599,10 @@ Dentry* Client::link(Dir *dir, const string& name, Inode *in, Dentry *dn)
   std::unique_lock pil{dir->parent_inode->inode_lock, std::adopt_lock};
 
   if (!dn) {
-    // create a new Dentry
-    dn = new Dentry(dir, name);
-
-    std::scoped_lock cl(client_lock);
-    lru.lru_insert_mid(dn);    // mid or top?
-
-    ldout(cct, 15) << "link dir " << dir->parent_inode << " '" << name << "' to inode " << in
-		   << " dn " << dn << " (new dn)" << dendl;
+    dn = _add_dentry(dir, name);
+    ldout(cct, 15) << "link dir " << dir->parent_inode << " '" << name
+                   << "' to inode " << in << " dn " << dn << " (new dn)"
+                   << dendl;
   } else {
     ceph_assert(!dn->inode);
     ldout(cct, 15) << "link dir " << dir->parent_inode << " '" << name << "' to inode " << in
@@ -7567,7 +7576,8 @@ void Client::renew_caps(MetaSession *session)
 // high level (POSIXy) interface
 
 int Client::_do_lookup(Inode *dir, const string& name, int mask,
-		       InodeRef *target, const UserPerm& perms)
+                       InodeRef *target, const UserPerm& perms,
+                       RenameLock *rl)
 {
   ceph_assert(ceph_mutex_is_locked_by_me(dir->inode_lock));
 
@@ -7585,12 +7595,18 @@ int Client::_do_lookup(Inode *dir, const string& name, int mask,
   ldout(cct, 10) << __func__ << " on " << path << dendl;
 
   int r;
-  dir->inode_lock.unlock();
+  if (rl)
+    rl->unlock();
+  else
+    dir->inode_lock.unlock();
   {
     std::scoped_lock cl(client_lock);
     r = make_request(req, perms, target);
   }
-  dir->inode_lock.lock();
+  if (rl)
+    rl->lock();
+  else
+    dir->inode_lock.lock();
   ldout(cct, 10) << __func__ << " res is " << r << dendl;
   return r;
 }
@@ -7618,7 +7634,8 @@ bool Client::_dentry_valid(const Dentry *dn)
 }
 
 int Client::_lookup(Inode *dir, const string& dname, int mask, InodeRef *target,
-		    const UserPerm& perms, std::string* alternate_name)
+                    const UserPerm& perms, RenameLock *rl,
+                    std::string* alternate_name)
 {
   ceph_assert(ceph_mutex_is_locked_by_me(dir->inode_lock));
 
@@ -7636,12 +7653,18 @@ int Client::_lookup(Inode *dir, const string& dname, int mask, InodeRef *target,
 
       InodeRef tmptarget;
       int r;
-      dir->inode_lock.unlock();
+      if (rl)
+        rl->unlock();
+      else
+        dir->inode_lock.unlock();
       {
         std::scoped_lock cl(client_lock);
         r = make_request(req, perms, &tmptarget, NULL, rand() % mdsmap->get_num_in_mds());
       }
-      dir->inode_lock.lock();
+      if (rl)
+        rl->lock();
+      else
+        dir->inode_lock.lock();
 
       std::scoped_lock cl{client_lock};
       if (r == 0) {
@@ -7722,7 +7745,7 @@ relookup:
     r = 0;
     goto done;
   }
-  r = _do_lookup(dir, dname, mask, target, perms);
+  r = _do_lookup(dir, dname, mask, target, perms, rl);
   did_lookup_request = true;
   if (r == 0) {
     /* complete lookup to get dentry for alternate_name */
@@ -7768,7 +7791,7 @@ int Client::get_or_create(Inode *dir, const char* name,
     *pdn = dn;
   } else {
     // otherwise link up a new one
-    *pdn = link(dir->dir, name, NULL, NULL);
+    *pdn = _add_dentry(dir->dir, name);
   }
 
   // success
@@ -7834,7 +7857,7 @@ int Client::path_walk(const filepath& origpath, walk_dentry_result* result, cons
     /* Get extra requested caps on the last component */
     if (i == (path.depth() - 1))
       caps |= mask;
-    int r = _lookup(cur.get(), dname, caps, &next, perms, &alternate_name);
+    int r = _lookup(cur.get(), dname, caps, &next, perms, NULL, &alternate_name);
     if (r < 0)
       return r;
     // only follow trailing symlink if followsym.  always follow
@@ -14658,6 +14681,7 @@ int Client::_rename(Inode *fromdir, const char *fromname, Inode *todir, const ch
 		<< " uid " << perm.uid() << " gid " << perm.gid() << ")"
 		<< dendl;
 
+  RenameLock rl{this, fromdir, todir};
   if (fromdir->snapid != todir->snapid)
     return -CEPHFS_EXDEV;
 
@@ -14669,14 +14693,9 @@ int Client::_rename(Inode *fromdir, const char *fromname, Inode *todir, const ch
       return -CEPHFS_EROFS;
   }
   if (fromdir != todir) {
-    Inode *fromdir_root;
-    {
-      std::scoped_lock il(fromdir->inode_lock);
-      fromdir_root =
+    Inode *fromdir_root =
         fromdir->quota.is_enable() ? fromdir : get_quota_root(fromdir, perm);
-    }
 
-    std::scoped_lock il(todir->inode_lock);
     Inode *todir_root =
       todir->quota.is_enable() ? todir : get_quota_root(todir, perm);
     if (fromdir_root != todir_root) {
@@ -14688,47 +14707,35 @@ int Client::_rename(Inode *fromdir, const char *fromname, Inode *todir, const ch
   MetaRequestRef req = create_request(op);
 
   filepath from, to;
-  {
-    std::scoped_lock il(fromdir->inode_lock);
-    fromdir->make_nosnap_relative_path(from);
-  }
+  fromdir->make_nosnap_relative_path(from);
   from.push_dentry(fromname);
-  {
-    std::scoped_lock il(todir->inode_lock);
-    todir->make_nosnap_relative_path(to);
-  }
+  todir->make_nosnap_relative_path(to);
   to.push_dentry(toname);
   req->set_filepath(to);
   req->set_filepath2(from);
   req->set_alternate_name(std::move(alternate_name));
 
   Dentry *oldde;
-  int res;
-  {
-    std::scoped_lock il(fromdir->inode_lock);
-    res = get_or_create(fromdir, fromname, &oldde);
-    if (res < 0)
-      return res;
-    if (op == CEPH_MDS_OP_RENAME)
-      req->set_old_dentry(oldde);
-    else
-      // renamesnap reply contains no tracedn, so we need to invalidate
-      // dentry manually
-      unlink(oldde, true, true);
-  }
+  int res = get_or_create(fromdir, fromname, &oldde);
+  if (res < 0)
+    return res;
+  if (op == CEPH_MDS_OP_RENAME)
+    req->set_old_dentry(oldde);
+  else
+    // renamesnap reply contains no tracedn, so we need to invalidate
+    // dentry manually
+    unlink(oldde, true, true);
+
   Dentry *de;
-  {
-    std::scoped_lock il(todir->inode_lock);
-    res = get_or_create(todir, toname, &de);
-    if (res < 0)
-      return res;
-    if (op == CEPH_MDS_OP_RENAME)
-      req->set_dentry(de);
-    else
-      // renamesnap reply contains no tracedn, so we need to invalidate
-      // dentry manually
-      unlink(de, true, true);
-  }
+  res = get_or_create(todir, toname, &de);
+  if (res < 0)
+    return res;
+  if (op == CEPH_MDS_OP_RENAME)
+    req->set_dentry(de);
+  else
+    // renamesnap reply contains no tracedn, so we need to invalidate
+    // dentry manually
+    unlink(de, true, true);
 
   if (op == CEPH_MDS_OP_RENAME) {
     req->old_dentry_drop = CEPH_CAP_FILE_SHARED;
@@ -14738,27 +14745,30 @@ int Client::_rename(Inode *fromdir, const char *fromname, Inode *todir, const ch
     req->dentry_unless = CEPH_CAP_FILE_EXCL;
 
     InodeRef oldin, otherin;
-    {
-      std::scoped_lock il(fromdir->inode_lock);
-      res = _lookup(fromdir, fromname, 0, &oldin, perm);
-      if (res < 0)
-        return res;
-    }
+    res = _lookup(fromdir, fromname, 0, &oldin, perm, &rl);
+    if (res < 0)
+      return res;
 
     {
-      std::scoped_lock il(oldin->inode_lock);
-      oldin->break_all_delegs();
+      // if renaming the "." or ".." we already hold the lock
+      if (oldin == fromdir || oldin == todir) {
+        oldin->break_all_delegs();
+      } else {
+        std::scoped_lock il(oldin->inode_lock);
+        oldin->break_all_delegs();
+      }
     }
     req->set_old_inode(oldin.get());
     req->old_inode_drop = CEPH_CAP_LINK_SHARED;
 
-    {
-      std::scoped_lock il(todir->inode_lock);
-      res = _lookup(todir, toname, 0, &otherin, perm);
-    }
+    res = _lookup(todir, toname, 0, &otherin, perm, &rl);
     switch (res) {
     case 0:
-      {
+      // if renaming the "." or ".." we already hold the lock
+      if (otherin == fromdir || otherin == todir) {
+	req->set_other_inode(otherin.get());
+	otherin->break_all_delegs();
+      } else {
         std::scoped_lock il(otherin->inode_lock);
 	req->set_other_inode(otherin.get());
 	otherin->break_all_delegs();
@@ -14775,6 +14785,7 @@ int Client::_rename(Inode *fromdir, const char *fromname, Inode *todir, const ch
   } else {
     req->set_inode(todir);
   }
+  rl.unlock();
 
   std::scoped_lock cl(client_lock);
   res = make_request(req, perm, &target);
@@ -16688,6 +16699,34 @@ mds_rank_t Client::_get_random_up_mds() const
   for (int n = rand() % up.size(); n; n--)
     ++p;
   return *p;
+}
+
+void RenameLock::lock(void)
+{
+  locked = true;
+
+  if (from == to) {
+    from->inode_lock.lock();
+    return;
+  }
+
+  client->rename_lock.lock();
+  from->inode_lock.lock();
+  to->inode_lock.lock();
+}
+
+void RenameLock::unlock(void)
+{
+  locked = false;
+
+  if (from == to) {
+    from->inode_lock.unlock();
+    return;
+  }
+
+  from->inode_lock.unlock();
+  to->inode_lock.unlock();
+  client->rename_lock.unlock();
 }
 
 
