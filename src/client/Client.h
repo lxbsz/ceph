@@ -59,7 +59,6 @@ class FSMap;
 class FSMapUser;
 class MonClient;
 
-
 struct DirStat;
 struct LeaseStat;
 struct InodeStat;
@@ -71,6 +70,8 @@ class WritebackHandler;
 class MDSMap;
 class Message;
 class destructive_lock_ref_t;
+
+class RenameLock;
 
 enum {
   l_c_first = 20000,
@@ -377,8 +378,12 @@ public:
   void seekdir(dir_result_t *dirp, loff_t offset);
 
   int may_delete(const char *relpath, const UserPerm& perms);
+  Dentry* _add_dentry(Dir *dir, const string& name);
   int link(const char *existing, const char *newname, const UserPerm& perm, std::string alternate_name="");
   int unlink(const char *path, const UserPerm& perm);
+  bool is_ancester(Inode *in1, Inode *in2);
+  void lock_rename(Inode *fromdir, Inode *todir);
+  void unlock_rename(Inode *fromdir, Inode *todir);
   int rename(const char *from, const char *to, const UserPerm& perm, std::string alternate_name="");
 
   // dirs
@@ -866,6 +871,10 @@ public:
   //  - protects Client and buffer cache both!
   ceph::mutex client_lock = ceph::make_mutex("Client::client_lock");
 
+  // global rename lock
+  //  - to make sure inode locks won't cause deadlock
+  ceph::mutex rename_lock = ceph::make_mutex("Client::rename_lock");
+
 protected:
   /* Flags for check_caps() */
   static const unsigned CHECK_CAPS_NODELAY = 0x1;
@@ -1276,15 +1285,17 @@ private:
   // internal interface
   //   call these with client_lock held!
   int _do_lookup(Inode *dir, const string& name, int mask, InodeRef *target,
-		 const UserPerm& perms);
+		 const UserPerm& perms, RenameLock *rl=nullptr);
 
   int _lookup(Inode *dir, const string& dname, int mask, InodeRef *target,
-	      const UserPerm& perm, std::string* alternate_name=nullptr);
+              const UserPerm& perm, RenameLock *rl=nullptr,
+              std::string* alternate_name=nullptr);
 
   int _link(Inode *in, Inode *dir, const char *name, const UserPerm& perm, std::string alternate_name,
 	    InodeRef *inp = 0);
   int _unlink(Inode *dir, const char *name, const UserPerm& perm);
-  int _rename(Inode *olddir, const char *oname, Inode *ndir, const char *nname, const UserPerm& perm, std::string alternate_name);
+  int _rename(Inode *olddir, const char *oname, Inode *ndir, const char *nname,
+              const UserPerm& perm, RenameLock *rl, std::string alternate_name);
   int _mkdir(Inode *dir, const char *name, mode_t mode, const UserPerm& perm,
 	     InodeRef *inp = 0, const std::map<std::string, std::string> &metadata={},
              std::string alternate_name="");
@@ -1360,7 +1371,8 @@ private:
   int may_open(Inode *in, int flags, const UserPerm& perms);
   int may_lookup(Inode *dir, const UserPerm& perms);
   int may_create(Inode *dir, const UserPerm& perms);
-  int may_delete(Inode *dir, const char *name, const UserPerm& perms);
+  int may_delete(Inode *dir, const char *name, const UserPerm& perms,
+                 RenameLock *rl=nullptr);
   int may_hardlink(Inode *in, const UserPerm& perms);
 
   int _getattr_for_perm(Inode *in, const UserPerm& perms);
@@ -1543,6 +1555,42 @@ private:
 
   ceph::spinlock delay_i_lock;
   std::map<Inode*,int> delay_i_release;
+};
+
+class RenameLock {
+  InodeRef from;
+  InodeRef to;
+  Client *client;
+  bool locked = false;
+
+  enum {
+    STATE_INIT,
+    STATE_ANY,  // from == to
+    STATE_FROM, // take the from->inode_lock first
+    STATE_TO,   // take the to->inode_lock first
+    STATE_PARALLEL, // has not parent/child relationship
+  };
+  int state = STATE_INIT;
+
+  bool is_ancester(Inode *pin, Inode *cin);
+
+public:
+  void lock(void);
+  void unlock(void);
+
+  RenameLock(Client *c, Inode *f, Inode *t)
+    : client(c) {
+    {
+      std::scoped_lock cl{client->client_lock};
+      from = f;
+      to = t;
+    }
+    lock();
+  }
+  ~RenameLock() {
+    if (locked)
+      unlock();
+  }
 };
 
 /**
