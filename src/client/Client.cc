@@ -4527,7 +4527,6 @@ void Client::_schedule_invalidate_callback(Inode *in, int64_t off, int64_t len)
 {
   ceph_assert(ceph_mutex_is_locked_by_me(in->inode_lock));
 
-  std::scoped_lock cl{client_lock};
   if (ino_invalidate_cb)
     // we queue the invalidate, which calls the callback and decrements the ref
     async_ino_invalidator.queue(new C_Client_CacheInvalidate(this, in, off, len));
@@ -4958,20 +4957,16 @@ void Client::_invalidate_kernel_dcache()
     InodeRef in = root;
     client_lock.unlock();
     std::unique_lock il{in->inode_lock};
-    client_lock.lock();
     if (dentry_invalidate_cb && in->dir) {
       for (ceph::unordered_map<string, Dentry*>::iterator p = in->dir->dentries.begin();
          p != in->dir->dentries.end();
          ++p) {
         if (p->second->inode) {
-          client_lock.unlock();
-          il.unlock();
           _schedule_invalidate_dentry_callback(p->second, false);
-          il.lock();
-          client_lock.lock();
         }
       }
     }
+    client_lock.lock();
   } else if (remount_cb) {
     // Hacky:
     // when remounting a file system, linux kernel trims all unused dentries in the fs
@@ -6116,7 +6111,6 @@ void Client::_async_dentry_invalidate(vinodeno_t dirino, vinodeno_t ino, string&
 void Client::_schedule_invalidate_dentry_callback(Dentry *dn, bool del)
 {
   std::scoped_lock il{dn->inode->inode_lock};
-  std::scoped_lock cl{client_lock};
   if (dentry_invalidate_cb && dn->inode->ll_ref > 0)
     async_dentry_invalidator.queue(new C_Client_DentryInvalidate(this, dn, del));
 }
