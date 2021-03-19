@@ -9,8 +9,10 @@
 #include "include/xlist.h"
 
 struct Inode;
+class Client;
 
 struct SnapRealm {
+  Client *client;
   inodeno_t ino;
   int nref;
   snapid_t created;
@@ -31,8 +33,8 @@ private:
 public:
   xlist<Inode*> inodes_with_caps;
 
-  explicit SnapRealm(inodeno_t i) :
-    ino(i), nref(0), created(0), seq(0),
+  explicit SnapRealm(Client *c, inodeno_t i) :
+    client(c), ino(i), nref(0), created(0), seq(0),
     pparent(NULL) { }
 
   void build_snap_context();
@@ -45,6 +47,7 @@ public:
       build_snap_context();
     return cached_snap_context;
   }
+  const SnapContext& get_snap_context_locked();
 
   void dump(Formatter *f) const;
 };

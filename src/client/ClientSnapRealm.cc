@@ -2,6 +2,7 @@
 // vim: ts=8 sw=2 smarttab
 
 #include "ClientSnapRealm.h"
+#include "Client.h"
 #include "common/Formatter.h"
 
 void SnapRealm::build_snap_context()
@@ -33,6 +34,11 @@ void SnapRealm::build_snap_context()
   cached_snap_context.snaps.reserve(snaps.size());
   for (set<snapid_t>::reverse_iterator p = snaps.rbegin(); p != snaps.rend(); ++p)
     cached_snap_context.snaps.push_back(*p);
+}
+
+const SnapContext& SnapRealm::get_snap_context_locked() {
+  std::scoped_lock cl(client->client_lock);
+  return get_snap_context();
 }
 
 void SnapRealm::dump(Formatter *f) const

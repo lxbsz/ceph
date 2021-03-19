@@ -3973,7 +3973,7 @@ void Client::send_cap(Inode *in, MetaSession *session, Cap *cap,
   snapid_t follows = 0;
 
   if (flush)
-    follows = in->snaprealm->get_snap_context().seq;
+    follows = in->snaprealm->get_snap_context_locked().seq;
 
   auto m = make_message<MClientCaps>(op,
 				   in->ino,
@@ -4614,7 +4614,8 @@ void Client::_flush_range(Inode *in, int64_t offset, uint64_t size)
   }
 
   C_SaferCond onflush("Client::_flush_range flock");
-  int ret = objectcacher->file_flush(&in->oset, &in->layout, in->snaprealm->get_snap_context(),
+  int ret = objectcacher->file_flush(&in->oset, &in->layout,
+                                     in->snaprealm->get_snap_context_locked(),
                                      offset, size, &onflush);
   if (!ret) {
     // wait for flush
@@ -5460,7 +5461,7 @@ SnapRealm *Client::get_snap_realm(inodeno_t r)
 
   SnapRealm *realm = snap_realms[r];
   if (!realm)
-    snap_realms[r] = realm = new SnapRealm(r);
+    snap_realms[r] = realm = new SnapRealm(this, r);
   ldout(cct, 20) << __func__ << " " << r << " " << realm << " " << realm->nref << " -> " << (realm->nref + 1) << dendl;
   realm->nref++;
   return realm;
@@ -10647,7 +10648,7 @@ int Client::uninline_data(Inode *in, Context *onfinish)
   objecter->mutate(oid,
 		   OSDMap::file_to_object_locator(in->layout),
 		   create_ops,
-		   in->snaprealm->get_snap_context(),
+		   in->snaprealm->get_snap_context_locked(),
 		   ceph::real_clock::now(),
 		   0,
 		   NULL);
@@ -10667,7 +10668,7 @@ int Client::uninline_data(Inode *in, Context *onfinish)
   objecter->mutate(oid,
 		   OSDMap::file_to_object_locator(in->layout),
 		   uninline_ops,
-		   in->snaprealm->get_snap_context(),
+		   in->snaprealm->get_snap_context_locked(),
 		   ceph::real_clock::now(),
 		   0,
 		   onfinish);
@@ -11260,7 +11261,7 @@ int64_t Client::_write(Fh *f, int64_t offset, uint64_t size, const char *buf,
 
     // async, caching, non-blocking.
     r = objectcacher->file_write(&in->oset, &in->layout,
-                                   in->snaprealm->get_snap_context(),
+                                   in->snaprealm->get_snap_context_locked(),
                                    offset, size, bl, ceph::real_clock::now(),
                                    0);
     put_cap_ref(in, CEPH_CAP_FILE_BUFFER);
@@ -11283,7 +11284,8 @@ int64_t Client::_write(Fh *f, int64_t offset, uint64_t size, const char *buf,
     C_SaferCond onfinish("Client::_write flock");
     get_cap_ref(in, CEPH_CAP_FILE_BUFFER);
 
-    filer->write_trunc(in->ino, &in->layout, in->snaprealm->get_snap_context(),
+    filer->write_trunc(in->ino, &in->layout,
+                       in->snaprealm->get_snap_context_locked(),
                        offset, size, bl, ceph::real_clock::now(), 0,
                        in->truncate_size, in->truncate_seq,
                        &onfinish);
@@ -15541,7 +15543,7 @@ int Client::_fallocate(Fh *fh, int mode, int64_t offset, int64_t length)
 
       _invalidate_inode_cache(in, offset, length);
       filer->zero(in->ino, &in->layout,
-                  in->snaprealm->get_snap_context(),
+                  in->snaprealm->get_snap_context_locked(),
                   offset, length,
                   ceph::real_clock::now(),
                   0, true, &onfinish);
