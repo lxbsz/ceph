@@ -349,7 +349,7 @@ void MetricsHandler::update_rank0() {
   for (auto p = client_metrics_map.begin(); p != client_metrics_map.end();) {
     // copy metrics and update local metrics map as required
     auto &metrics = p->second.second;
-    update_client_metrics_map.emplace(p->first, metrics);
+    update_client_metrics_map.emplace(p->first, std::move(metrics));
     if (metrics.update_type == UPDATE_TYPE_REFRESH) {
       metrics = {};
       ++p;
